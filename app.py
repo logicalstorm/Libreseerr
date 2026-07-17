@@ -28,6 +28,7 @@ except ImportError:
 from bookshelf import BookshelfClient
 from readarr import ReadarrClient
 from lazylibrarian import LazyLibrarianClient
+from audiobookshelf import AudiobookshelfClient
 
 app = Flask(__name__)
 
@@ -69,7 +70,7 @@ REQUESTS_FILE = os.path.join(os.path.dirname(__file__), "data", "requests.json")
 USERS_FILE = os.path.join(os.path.dirname(__file__), "data", "users.json")
 
 # In-memory state
-config = {"ebook": {}, "audiobook": {}, "ldap": {}, "oidc": {}}
+config = {"ebook": {}, "audiobook": {}, "ldap": {}, "oidc": {}, "jellyfin": {}, "audiobookshelf": {}}
 requests_history = []
 users = []
 lock = threading.Lock()
@@ -285,6 +286,74 @@ def try_ldap_auth(username, password):
         return False, "", str(e)
 
 
+# ─── Jellyfin Auth ───
+
+JELLYFIN_DEVICE_HEADER = (
+    'MediaBrowser Client="Libreseerr", Device="Web", '
+    'DeviceId="libreseerr", Version="1.0.0"'
+)
+
+
+def _get_jellyfin_defaults():
+    return {
+        "enabled": False,
+        "server_url": "",
+        "default_role": "user",
+    }
+
+
+def _get_audiobookshelf_defaults():
+    return {
+        "enabled": False,
+        "server_url": "",
+        "api_key": "",
+    }
+
+
+def get_audiobookshelf_client():
+    abs_config = config.get("audiobookshelf", {})
+    if not abs_config.get("enabled"):
+        return None
+    server_url = abs_config.get("server_url", "")
+    api_key = abs_config.get("api_key", "")
+    if not server_url or not api_key:
+        return None
+    return AudiobookshelfClient(server_url, api_key)
+
+
+def try_jellyfin_auth(username, password):
+    """Attempt authentication against a Jellyfin server's AuthenticateByName
+    endpoint, the same real account store the rest of GOJ already uses —
+    mirrors the LDAP bind check above rather than trusting a second,
+    independently-maintained password store.
+
+    Returns (success: bool, error: str).
+    """
+    jellyfin = config.get("jellyfin", {})
+    if not jellyfin.get("enabled"):
+        return False, "Jellyfin auth is not enabled"
+
+    server_url = (jellyfin.get("server_url") or "").rstrip("/")
+    if not server_url:
+        return False, "Jellyfin server_url not configured"
+
+    try:
+        resp = http_requests.post(
+            f"{server_url}/Users/AuthenticateByName",
+            headers={
+                "Content-Type": "application/json",
+                "X-Emby-Authorization": JELLYFIN_DEVICE_HEADER,
+            },
+            json={"Username": username, "Pw": password},
+            timeout=10,
+        )
+        if resp.status_code == 200:
+            return True, ""
+        return False, f"Jellyfin rejected credentials (HTTP {resp.status_code})"
+    except Exception as e:
+        return False, str(e)
+
+
 def get_client(server_type: str) -> ReadarrClient | BookshelfClient | LazyLibrarianClient | None:
     """Get a client for the given server type based on server_software setting."""
     server = config.get(server_type, {})
@@ -350,6 +419,28 @@ def api_login():
             app.logger.info("login_user returned %s for '%s'", ok, username)
             return jsonify({"success": True, "username": existing["username"], "role": existing.get("role", "user")})
         app.logger.info("LDAP auth failed for '%s': %s", username, error)
+
+    # Fall through to Jellyfin if configured
+    jellyfin = config.get("jellyfin", {})
+    if jellyfin.get("enabled"):
+        app.logger.info("Jellyfin auth enabled, attempting auth for '%s'", username)
+        success, error = try_jellyfin_auth(username, password)
+        app.logger.info("Jellyfin auth result: success=%s, error=%s", success, error)
+        if success:
+            existing = next((u for u in users if u["username"] == username), None)
+            if not existing:
+                existing = {
+                    "username": username,
+                    "password_hash": "jellyfin",
+                    "role": jellyfin.get("default_role", "user"),
+                    "created_at": datetime.utcnow().isoformat(),
+                }
+                users.append(existing)
+                save_users()
+            ok = login_user(User(existing))
+            app.logger.info("login_user returned %s for '%s'", ok, username)
+            return jsonify({"success": True, "username": existing["username"], "role": existing.get("role", "user")})
+        app.logger.info("Jellyfin auth failed for '%s': %s", username, error)
 
     return jsonify({"error": "Invalid username or password"}), 401
 
@@ -515,6 +606,96 @@ def test_ldap():
         conn.search(base_dn, test_filter, search_scope=SUBTREE, size_limit=1)
         conn.unbind()
         return jsonify({"success": True, "message": "Connected to LDAP server successfully"})
+    except Exception as e:
+        return jsonify({"error": str(e)}), 400
+
+
+# ─── Jellyfin Config API ───
+
+@app.route("/api/jellyfin", methods=["GET"])
+@admin_required
+def get_jellyfin():
+    jellyfin = config.get("jellyfin", _get_jellyfin_defaults())
+    return jsonify({
+        "enabled": jellyfin.get("enabled", False),
+        "server_url": jellyfin.get("server_url", ""),
+        "default_role": jellyfin.get("default_role", "user"),
+    })
+
+
+@app.route("/api/jellyfin", methods=["POST"])
+@admin_required
+def update_jellyfin():
+    data = request.json
+    if data.get("default_role") not in ("admin", "user"):
+        return jsonify({"error": "Role must be 'admin' or 'user'"}), 400
+    config["jellyfin"] = {
+        "enabled": bool(data.get("enabled")),
+        "server_url": data.get("server_url", "").strip(),
+        "default_role": data.get("default_role", "user"),
+    }
+    save_config()
+    return jsonify({"success": True})
+
+
+@app.route("/api/jellyfin/test", methods=["POST"])
+@admin_required
+def test_jellyfin():
+    data = request.json
+    server_url = data.get("server_url", "").strip().rstrip("/")
+    if not server_url:
+        return jsonify({"error": "server_url is required"}), 400
+    try:
+        resp = http_requests.get(f"{server_url}/System/Ping", timeout=10)
+        if resp.status_code == 200:
+            return jsonify({"success": True, "message": "Connected to Jellyfin server successfully"})
+        return jsonify({"error": f"Jellyfin responded with HTTP {resp.status_code}"}), 400
+    except Exception as e:
+        return jsonify({"error": str(e)}), 400
+
+
+# ─── Audiobookshelf Config API ───
+# Separate from the "audiobook" download-manager config above — this points
+# at the actual Audiobookshelf media server so search results can show
+# "already available" for the real library, not just what the download
+# manager happens to be tracking.
+
+@app.route("/api/audiobookshelf", methods=["GET"])
+@admin_required
+def get_audiobookshelf():
+    abs_config = config.get("audiobookshelf", _get_audiobookshelf_defaults())
+    return jsonify({
+        "enabled": abs_config.get("enabled", False),
+        "server_url": abs_config.get("server_url", ""),
+        "api_key": abs_config.get("api_key", ""),
+    })
+
+
+@app.route("/api/audiobookshelf", methods=["POST"])
+@admin_required
+def update_audiobookshelf():
+    data = request.json
+    config["audiobookshelf"] = {
+        "enabled": bool(data.get("enabled")),
+        "server_url": data.get("server_url", "").strip(),
+        "api_key": data.get("api_key", "").strip(),
+    }
+    save_config()
+    return jsonify({"success": True})
+
+
+@app.route("/api/audiobookshelf/test", methods=["POST"])
+@admin_required
+def test_audiobookshelf():
+    data = request.json
+    server_url = data.get("server_url", "").strip().rstrip("/")
+    api_key = data.get("api_key", "").strip()
+    if not server_url or not api_key:
+        return jsonify({"error": "server_url and api_key are required"}), 400
+    try:
+        client = AudiobookshelfClient(server_url, api_key)
+        libraries = client.test_connection().get("libraries", [])
+        return jsonify({"success": True, "message": f"Connected — found {len(libraries)} librar{'y' if len(libraries) == 1 else 'ies'}"})
     except Exception as e:
         return jsonify({"error": str(e)}), 400
 
@@ -911,6 +1092,19 @@ def check_availability():
             }
         except Exception as e:
             app.logger.warning("Failed to get books from %s: %s", server_type, e)
+
+    # Also check the real Audiobookshelf library directly — most of GOJ's
+    # audiobooks arrive via a Libation-export pipeline the download manager
+    # above never sees, so relying on it alone misses most of what's
+    # actually already available to listen to.
+    abs_client = get_audiobookshelf_client()
+    if abs_client:
+        try:
+            result["audiobook"]["titles"] = list(
+                set(result["audiobook"]["titles"]) | abs_client.get_available_titles()
+            )
+        except Exception as e:
+            app.logger.warning("Failed to get titles from Audiobookshelf: %s", e)
 
     # Also include books with active requests (pending/processing/downloading)
     active_statuses = {"pending", "processing", "downloading"}

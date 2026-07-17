@@ -87,7 +87,7 @@ document.querySelectorAll(".sidebar-link").forEach((link) => {
         document.getElementById(pageId).classList.add("active");
         if (link.dataset.page === "requests") loadRequests();
         if (link.dataset.page === "settings") loadConfig();
-        if (link.dataset.page === "users") { loadUsers(); loadLDAP(); loadOIDC(); }
+        if (link.dataset.page === "users") { loadUsers(); loadJellyfin(); loadAudiobookshelf(); loadLDAP(); loadOIDC(); }
         closeSidebar();
     });
 });
@@ -685,6 +685,142 @@ document.getElementById("download-modal").addEventListener("click", (e) => {
 document.getElementById("user-modal").addEventListener("click", (e) => {
     if (e.target === e.currentTarget) closeUserModal();
 });
+
+// ─── Jellyfin Configuration ───
+
+async function loadJellyfin() {
+    try {
+        const resp = await fetch("/api/jellyfin");
+        const data = await resp.json();
+        document.getElementById("jellyfin-enabled").checked = data.enabled || false;
+        document.getElementById("jellyfin-server-url").value = data.server_url || "";
+        document.getElementById("jellyfin-default-role").value = data.default_role || "user";
+    } catch (err) {
+        console.error("Failed to load Jellyfin config", err);
+    }
+}
+
+window.saveJellyfin = async function () {
+    const statusEl = document.getElementById("jellyfin-status");
+    try {
+        const resp = await fetch("/api/jellyfin", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+                enabled: document.getElementById("jellyfin-enabled").checked,
+                server_url: document.getElementById("jellyfin-server-url").value,
+                default_role: document.getElementById("jellyfin-default-role").value,
+            }),
+        });
+        const data = await resp.json();
+        if (data.error) {
+            statusEl.className = "status-msg error";
+            statusEl.textContent = data.error;
+        } else {
+            statusEl.className = "status-msg success";
+            statusEl.textContent = "Jellyfin configuration saved!";
+        }
+    } catch (err) {
+        statusEl.className = "status-msg error";
+        statusEl.textContent = "Error: " + err.message;
+    }
+    setTimeout(() => { statusEl.textContent = ""; }, 3000);
+};
+
+window.testJellyfin = async function () {
+    const statusEl = document.getElementById("jellyfin-status");
+    statusEl.className = "status-msg";
+    statusEl.textContent = "Testing...";
+    try {
+        const resp = await fetch("/api/jellyfin/test", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+                server_url: document.getElementById("jellyfin-server-url").value,
+            }),
+        });
+        const data = await resp.json();
+        if (data.success) {
+            statusEl.className = "status-msg success";
+            statusEl.textContent = data.message;
+        } else {
+            statusEl.className = "status-msg error";
+            statusEl.textContent = "Failed: " + data.error;
+        }
+    } catch (err) {
+        statusEl.className = "status-msg error";
+        statusEl.textContent = "Error: " + err.message;
+    }
+};
+
+// ─── Audiobookshelf Configuration ───
+
+async function loadAudiobookshelf() {
+    try {
+        const resp = await fetch("/api/audiobookshelf");
+        const data = await resp.json();
+        document.getElementById("audiobookshelf-enabled").checked = data.enabled || false;
+        document.getElementById("audiobookshelf-server-url").value = data.server_url || "";
+        document.getElementById("audiobookshelf-api-key").value = data.api_key || "";
+    } catch (err) {
+        console.error("Failed to load Audiobookshelf config", err);
+    }
+}
+
+window.saveAudiobookshelf = async function () {
+    const statusEl = document.getElementById("audiobookshelf-status");
+    try {
+        const resp = await fetch("/api/audiobookshelf", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+                enabled: document.getElementById("audiobookshelf-enabled").checked,
+                server_url: document.getElementById("audiobookshelf-server-url").value,
+                api_key: document.getElementById("audiobookshelf-api-key").value,
+            }),
+        });
+        const data = await resp.json();
+        if (data.error) {
+            statusEl.className = "status-msg error";
+            statusEl.textContent = data.error;
+        } else {
+            statusEl.className = "status-msg success";
+            statusEl.textContent = "Audiobookshelf configuration saved!";
+            cachedAvailability = null;
+        }
+    } catch (err) {
+        statusEl.className = "status-msg error";
+        statusEl.textContent = "Error: " + err.message;
+    }
+    setTimeout(() => { statusEl.textContent = ""; }, 3000);
+};
+
+window.testAudiobookshelf = async function () {
+    const statusEl = document.getElementById("audiobookshelf-status");
+    statusEl.className = "status-msg";
+    statusEl.textContent = "Testing...";
+    try {
+        const resp = await fetch("/api/audiobookshelf/test", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+                server_url: document.getElementById("audiobookshelf-server-url").value,
+                api_key: document.getElementById("audiobookshelf-api-key").value,
+            }),
+        });
+        const data = await resp.json();
+        if (data.success) {
+            statusEl.className = "status-msg success";
+            statusEl.textContent = data.message;
+        } else {
+            statusEl.className = "status-msg error";
+            statusEl.textContent = "Failed: " + data.error;
+        }
+    } catch (err) {
+        statusEl.className = "status-msg error";
+        statusEl.textContent = "Error: " + err.message;
+    }
+};
 
 // ─── LDAP Configuration ───
 

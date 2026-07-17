@@ -527,6 +527,12 @@ body.is-admin .sidebar-role {
     font-weight: 600;
 }
 
+.settings-hint {
+    margin: -0.5rem 0 0.75rem;
+    color: var(--text-secondary);
+    font-size: 0.8rem;
+}
+
 .btn-group { display: flex; gap: 0.5rem; }
 
 .status-msg {
