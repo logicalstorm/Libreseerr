@@ -159,6 +159,54 @@
                     <details>
                         <summary class="ldap-summary">Advanced</summary>
                         <div class="settings-card" style="margin-top: 1rem;">
+                            <h3>Jellyfin Configuration</h3>
+                            <div class="form-group">
+                                <label class="toggle-label">
+                                    <input type="checkbox" id="jellyfin-enabled">
+                                    Enable Jellyfin Authentication
+                                </label>
+                            </div>
+                            <div class="form-group">
+                                <label for="jellyfin-server-url">Server URL</label>
+                                <input type="text" id="jellyfin-server-url" placeholder="http://192.168.10.234:8096">
+                            </div>
+                            <div class="form-group">
+                                <label for="jellyfin-default-role">Default Role for New Jellyfin Users</label>
+                                <select id="jellyfin-default-role">
+                                    <option value="user">User</option>
+                                    <option value="admin">Admin</option>
+                                </select>
+                            </div>
+                            <div class="btn-group">
+                                <button class="btn btn-secondary" onclick="testJellyfin()">Test Connection</button>
+                                <button class="btn btn-primary" onclick="saveJellyfin()">Save</button>
+                            </div>
+                            <div id="jellyfin-status" class="status-msg"></div>
+                        </div>
+                        <div class="settings-card" style="margin-top: 1rem;">
+                            <h3>Audiobookshelf Configuration</h3>
+                            <p class="settings-hint">Points at the real Audiobookshelf media server so search results can show a book as already available, separate from whatever the audiobook download manager above is tracking.</p>
+                            <div class="form-group">
+                                <label class="toggle-label">
+                                    <input type="checkbox" id="audiobookshelf-enabled">
+                                    Check Audiobookshelf for availability
+                                </label>
+                            </div>
+                            <div class="form-group">
+                                <label for="audiobookshelf-server-url">Server URL</label>
+                                <input type="text" id="audiobookshelf-server-url" placeholder="http://192.168.10.234:13378">
+                            </div>
+                            <div class="form-group">
+                                <label for="audiobookshelf-api-key">API Key</label>
+                                <input type="password" id="audiobookshelf-api-key">
+                            </div>
+                            <div class="btn-group">
+                                <button class="btn btn-secondary" onclick="testAudiobookshelf()">Test Connection</button>
+                                <button class="btn btn-primary" onclick="saveAudiobookshelf()">Save</button>
+                            </div>
+                            <div id="audiobookshelf-status" class="status-msg"></div>
+                        </div>
+                        <div class="settings-card" style="margin-top: 1rem;">
                             <h3>LDAP Configuration</h3>
                             <div class="form-group">
                                 <label class="toggle-label">

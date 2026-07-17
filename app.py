@@ -28,6 +28,7 @@ except ImportError:
 from bookshelf import BookshelfClient
 from readarr import ReadarrClient
 from lazylibrarian import LazyLibrarianClient
+from audiobookshelf import AudiobookshelfClient
 
 app = Flask(__name__)
 
@@ -69,7 +70,7 @@ REQUESTS_FILE = os.path.join(os.path.dirname(__file__), "data", "requests.json")
 USERS_FILE = os.path.join(os.path.dirname(__file__), "data", "users.json")
 
 # In-memory state
-config = {"ebook": {}, "audiobook": {}, "ldap": {}, "oidc": {}}
+config = {"ebook": {}, "audiobook": {}, "ldap": {}, "oidc": {}, "jellyfin": {}, "audiobookshelf": {}}
 requests_history = []
 users = []
 lock = threading.Lock()
@@ -285,6 +286,74 @@ def try_ldap_auth(username, password):
         return False, "", str(e)
 
 
+# ─── Jellyfin Auth ───
+
+JELLYFIN_DEVICE_HEADER = (
+    'MediaBrowser Client="Libreseerr", Device="Web", '
+    'DeviceId="libreseerr", Version="1.0.0"'
+)
+
+
+def _get_jellyfin_defaults():
+    return {
+        "enabled": False,
+        "server_url": "",
+        "default_role": "user",
+    }
+
+
+def _get_audiobookshelf_defaults():
+    return {
+        "enabled": False,
+        "server_url": "",
+        "api_key": "",
+    }
+
+
+def get_audiobookshelf_client():
+    abs_config = config.get("audiobookshelf", {})
+    if not abs_config.get("enabled"):
+        return None
+    server_url = abs_config.get("server_url", "")
+    api_key = abs_config.get("api_key", "")
+    if not server_url or not api_key:
+        return None
+    return AudiobookshelfClient(server_url, api_key)
+
+
+def try_jellyfin_auth(username, password):
+    """Attempt authentication against a Jellyfin server's AuthenticateByName
+    endpoint, the same real account store the rest of GOJ already uses —
+    mirrors the LDAP bind check above rather than trusting a second,
+    independently-maintained password store.
+
+    Returns (success: bool, error: str).
+    """
+    jellyfin = config.get("jellyfin", {})
+    if not jellyfin.get("enabled"):
+        return False, "Jellyfin auth is not enabled"
+
+    server_url = (jellyfin.get("server_url") or "").rstrip("/")
+    if not server_url:
+        return False, "Jellyfin server_url not configured"
+
+    try:
+        resp = http_requests.post(
+            f"{server_url}/Users/AuthenticateByName",
+            headers={
+                "Content-Type": "application/json",
+                "X-Emby-Authorization": JELLYFIN_DEVICE_HEADER,
+            },
+            json={"Username": username, "Pw": password},
+            timeout=10,
+        )
+        if resp.status_code == 200:
+            return True, ""
+        return False, f"Jellyfin rejected credentials (HTTP {resp.status_code})"
+    except Exception as e:
+        return False, str(e)
+
+
 def get_client(server_type: str) -> ReadarrClient | BookshelfClient | LazyLibrarianClient | None:
     """Get a client for the given server type based on server_software setting."""
     server = config.get(server_type, {})
@@ -350,6 +419,28 @@ def api_login():
             app.logger.info("login_user returned %s for '%s'", ok, username)
             return jsonify({"success": True, "username": existing["username"], "role": existing.get("role", "user")})
         app.logger.info("LDAP auth failed for '%s': %s", username, error)
+
+    # Fall through to Jellyfin if configured
+    jellyfin = config.get("jellyfin", {})
+    if jellyfin.get("enabled"):
+        app.logger.info("Jellyfin auth enabled, attempting auth for '%s'", username)
+        success, error = try_jellyfin_auth(username, password)
+        app.logger.info("Jellyfin auth result: success=%s, error=%s", success, error)
+        if success:
+            existing = next((u for u in users if u["username"] == username), None)
+            if not existing:
+                existing = {
+                    "username": username,
+                    "password_hash": "jellyfin",
+                    "role": jellyfin.get("default_role", "user"),
+                    "created_at": datetime.utcnow().isoformat(),
+                }
+                users.append(existing)
+                save_users()
+            ok = login_user(User(existing))
+            app.logger.info("login_user returned %s for '%s'", ok, username)
+            return jsonify({"success": True, "username": existing["username"], "role": existing.get("role", "user")})
+        app.logger.info("Jellyfin auth failed for '%s': %s", username, error)
 
     return jsonify({"error": "Invalid username or password"}), 401
 
@@ -515,6 +606,96 @@ def test_ldap():
         conn.search(base_dn, test_filter, search_scope=SUBTREE, size_limit=1)
         conn.unbind()
         return jsonify({"success": True, "message": "Connected to LDAP server successfully"})
+    except Exception as e:
+        return jsonify({"error": str(e)}), 400
+
+
+# ─── Jellyfin Config API ───
+
+@app.route("/api/jellyfin", methods=["GET"])
+@admin_required
+def get_jellyfin():
+    jellyfin = config.get("jellyfin", _get_jellyfin_defaults())
+    return jsonify({
+        "enabled": jellyfin.get("enabled", False),
+        "server_url": jellyfin.get("server_url", ""),
+        "default_role": jellyfin.get("default_role", "user"),
+    })
+
+
+@app.route("/api/jellyfin", methods=["POST"])
+@admin_required
+def update_jellyfin():
+    data = request.json
+    if data.get("default_role") not in ("admin", "user"):
+        return jsonify({"error": "Role must be 'admin' or 'user'"}), 400
+    config["jellyfin"] = {
+        "enabled": bool(data.get("enabled")),
+        "server_url": data.get("server_url", "").strip(),
+        "default_role": data.get("default_role", "user"),
+    }
+    save_config()
+    return jsonify({"success": True})
+
+
+@app.route("/api/jellyfin/test", methods=["POST"])
+@admin_required
+def test_jellyfin():
+    data = request.json
+    server_url = data.get("server_url", "").strip().rstrip("/")
+    if not server_url:
+        return jsonify({"error": "server_url is required"}), 400
+    try:
+        resp = http_requests.get(f"{server_url}/System/Ping", timeout=10)
+        if resp.status_code == 200:
+            return jsonify({"success": True, "message": "Connected to Jellyfin server successfully"})
+        return jsonify({"error": f"Jellyfin responded with HTTP {resp.status_code}"}), 400
+    except Exception as e:
+        return jsonify({"error": str(e)}), 400
+
+
+# ─── Audiobookshelf Config API ───
+# Separate from the "audiobook" download-manager config above — this points
+# at the actual Audiobookshelf media server so search results can show
+# "already available" for the real library, not just what the download
+# manager happens to be tracking.
+
+@app.route("/api/audiobookshelf", methods=["GET"])
+@admin_required
+def get_audiobookshelf():
+    abs_config = config.get("audiobookshelf", _get_audiobookshelf_defaults())
+    return jsonify({
+        "enabled": abs_config.get("enabled", False),
+        "server_url": abs_config.get("server_url", ""),
+        "api_key": abs_config.get("api_key", ""),
+    })
+
+
+@app.route("/api/audiobookshelf", methods=["POST"])
+@admin_required
+def update_audiobookshelf():
+    data = request.json
+    config["audiobookshelf"] = {
+        "enabled": bool(data.get("enabled")),
+        "server_url": data.get("server_url", "").strip(),
+        "api_key": data.get("api_key", "").strip(),
+    }
+    save_config()
+    return jsonify({"success": True})
+
+
+@app.route("/api/audiobookshelf/test", methods=["POST"])
+@admin_required
+def test_audiobookshelf():
+    data = request.json
+    server_url = data.get("server_url", "").strip().rstrip("/")
+    api_key = data.get("api_key", "").strip()
+    if not server_url or not api_key:
+        return jsonify({"error": "server_url and api_key are required"}), 400
+    try:
+        client = AudiobookshelfClient(server_url, api_key)
+        libraries = client.test_connection().get("libraries", [])
+        return jsonify({"success": True, "message": f"Connected — found {len(libraries)} librar{'y' if len(libraries) == 1 else 'ies'}"})
     except Exception as e:
         return jsonify({"error": str(e)}), 400
 
@@ -912,6 +1093,19 @@ def check_availability():
         except Exception as e:
             app.logger.warning("Failed to get books from %s: %s", server_type, e)
 
+    # Also check the real Audiobookshelf library directly — most of GOJ's
+    # audiobooks arrive via a Libation-export pipeline the download manager
+    # above never sees, so relying on it alone misses most of what's
+    # actually already available to listen to.
+    abs_client = get_audiobookshelf_client()
+    if abs_client:
+        try:
+            result["audiobook"]["titles"] = list(
+                set(result["audiobook"]["titles"]) | abs_client.get_available_titles()
+            )
+        except Exception as e:
+            app.logger.warning("Failed to get titles from Audiobookshelf: %s", e)
+
     # Also include books with active requests (pending/processing/downloading)
     active_statuses = {"pending", "processing", "downloading"}
     requests_by_type = {"ebook": {"isbns": set(), "titles": set()}, "audiobook": {"isbns": set(), "titles": set()}}
@@ -969,6 +1163,76 @@ def get_root_folders(server_type):
 
 # ─── Download / Request API ───
 
+def _fulfill_book_request(request_entry, quality_profile_id, root_folder):
+    """Look up the book in Readarr (or fall back to Open Library data) and add it.
+    Mutates request_entry's status/readarr_book_id/error in place."""
+    client = get_client(request_entry["server_type"])
+    title = request_entry["title"]
+    author_name = request_entry["author"]
+    isbn = request_entry["isbn"]
+
+    try:
+        readarr_books = []
+        if isbn:
+            readarr_books = client.lookup_by_isbn(isbn)
+        if not readarr_books:
+            readarr_books = client.search_books(f"{title} {author_name}")
+
+        if readarr_books:
+            # Use the full Readarr lookup result — it has the correct
+            # editions, images, links, etc. that Readarr expects.
+            # We only override the author if Readarr returned empty data.
+            readarr_book = readarr_books[0]
+            if not readarr_book.get("author", {}).get("authorName"):
+                readarr_book["author"] = {
+                    "authorName": author_name,
+                    "foreignAuthorId": "",
+                }
+            app.logger.info(
+                "Readarr match for '%s': title='%s', author=%s",
+                title, readarr_book.get("title"), json.dumps(readarr_book.get("author", {})),
+            )
+        else:
+            # Fallback: build data from Open Library
+            readarr_book = {
+                "title": title,
+                "author": {
+                    "authorName": author_name,
+                    "foreignAuthorId": "",
+                },
+                "foreignBookId": isbn,
+            }
+            app.logger.info("No Readarr match, using Open Library fallback for '%s' by '%s'", title, author_name)
+
+        request_entry["status"] = "processing"
+        result = client.add_book(readarr_book, quality_profile_id, root_folder)
+        request_entry["readarr_book_id"] = result.get("id")
+    except Exception as e:
+        request_entry["status"] = "error"
+        request_entry["error"] = str(e)
+
+
+def _notify_pending_request(request_entry):
+    """Best-effort webhook to Glen (reachable from Tower; n8n itself is not
+    — see GOJ Users Admin.md) so a Slack/email approval prompt goes out.
+    Never raises — a notification failure must not block request creation."""
+    webhook_url = os.environ.get("LIBRESEERR_NOTIFY_WEBHOOK_URL")
+    if not webhook_url:
+        return
+    try:
+        http_requests.post(
+            webhook_url,
+            json={
+                "id": request_entry["id"],
+                "title": request_entry["title"],
+                "requestedBy": {"username": request_entry["requested_by"]},
+            },
+            timeout=5.0,
+        )
+    except Exception as e:
+        app.logger.warning("Failed to notify n8n of pending request %s: %s", request_entry["id"], e)
+
+
 @app.route("/api/request", methods=["POST"])
 @login_required
 def create_request():
@@ -998,60 +1262,65 @@ def create_request():
         "cover_url": cover_url,
         "server_type": server_type,
         "quality_profile_id": quality_profile_id,
+        "root_folder": root_folder,
         "isbn": isbn,
         "status": "pending",
         "progress": 0,
         "error": None,
+        "requested_by": current_user.username,
         "created_at": datetime.utcnow().isoformat(),
     }
 
-    try:
-        # First, try to find the book in Readarr via ISBN lookup
-        readarr_books = []
-        if isbn:
-            readarr_books = client.lookup_by_isbn(isbn)
-        if not readarr_books:
-            readarr_books = client.search_books(f"{title} {author_name}")
-
-        if readarr_books:
-            # Use the full Readarr lookup result — it has the correct
-            # editions, images, links, etc. that Readarr expects.
-            # We only override the author if Readarr returned empty data.
-            readarr_book = readarr_books[0]
-            if not readarr_book.get("author", {}).get("authorName"):
-                readarr_book["author"] = {
-                    "authorName": author_name,
-                    "foreignAuthorId": "",
-                }
-            app.logger.info(
-                "Readarr match for '%s': title='%s', author=%s",
-                title, readarr_book.get("title"), json.dumps(readarr_book.get("author", {})),
-            )
-            request_entry["status"] = "processing"
-        else:
-            # Fallback: build data from Open Library
-            readarr_book = {
-                "title": title,
-                "author": {
-                    "authorName": author_name,
-                    "foreignAuthorId": "",
-                },
-                "foreignBookId": isbn or book_data.get("id", ""),
-            }
-            app.logger.info("No Readarr match, using Open Library fallback for '%s' by '%s'", title, author_name)
-            request_entry["status"] = "processing"
-
-        result = client.add_book(readarr_book, quality_profile_id, root_folder)
-        request_entry["readarr_book_id"] = result.get("id")
-    except Exception as e:
-        request_entry["status"] = "error"
-        request_entry["error"] = str(e)
+    if current_user.role == "admin":
+        _fulfill_book_request(request_entry, quality_profile_id, root_folder)
+    else:
+        _notify_pending_request(request_entry)
 
     with lock:
         requests_history.insert(0, request_entry)
         save_requests()
 
     return jsonify(request_entry)
+
+
+def _require_action_api_key(f):
+    """Auth for the approve/decline links sent via Slack/email — the clicker
+    has no Libreseerr session, so this checks a shared secret header instead."""
+    @wraps(f)
+    def decorated(*args, **kwargs):
+        expected = os.environ.get("LIBRESEERR_API_KEY")
+        if not expected or request.headers.get("X-Api-Key") != expected:
+            return jsonify({"error": "Invalid or missing API key"}), 401
+        return f(*args, **kwargs)
+    return decorated
+
+
+@app.route("/api/v1/request/<int:request_id>/approve", methods=["POST"])
+@_require_action_api_key
+def approve_request(request_id):
+    with lock:
+        entry = next((r for r in requests_history if r["id"] == request_id), None)
+        if not entry:
+            return jsonify({"error": "Request not found"}), 404
+        if entry["status"] != "pending":
+            return jsonify({"error": f"Request already {entry['status']}"}), 409
+        _fulfill_book_request(entry, entry["quality_profile_id"], entry["root_folder"])
+        save_requests()
+    return jsonify(entry)
+
+
+@app.route("/api/v1/request/<int:request_id>/decline", methods=["POST"])
+@_require_action_api_key
+def decline_request(request_id):
+    with lock:
+        entry = next((r for r in requests_history if r["id"] == request_id), None)
+        if not entry:
+            return jsonify({"error": "Request not found"}), 404
+        if entry["status"] != "pending":
+            return jsonify({"error": f"Request already {entry['status']}"}), 409
+        entry["status"] = "declined"
+        save_requests()
+    return jsonify(entry)
 
 
 @app.route("/api/requests", methods=["GET"])
@@ -1067,7 +1336,7 @@ def refresh_requests():
     """Refresh the status of all processing/downloading requests."""
     with lock:
         for req in requests_history:
-            if req["status"] in ("completed", "error"):
+            if req["status"] in ("completed", "error", "pending", "declined"):
                 continue
             client = get_client(req["server_type"])
             if not client:
