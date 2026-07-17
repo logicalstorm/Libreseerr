@@ -1213,9 +1213,10 @@ def _fulfill_book_request(request_entry, quality_profile_id, root_folder):
 
 
 def _notify_pending_request(request_entry):
-    """Best-effort webhook to n8n so a Slack/email approval prompt goes out.
+    """Best-effort webhook to Glen (reachable from Tower; n8n itself is not
+    — see GOJ Users Admin.md) so a Slack/email approval prompt goes out.
     Never raises — a notification failure must not block request creation."""
-    webhook_url = os.environ.get("LIBRESEERR_N8N_WEBHOOK_URL")
+    webhook_url = os.environ.get("LIBRESEERR_NOTIFY_WEBHOOK_URL")
     if not webhook_url:
         return
     try:
