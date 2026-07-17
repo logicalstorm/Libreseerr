@@ -1163,6 +1163,75 @@ def get_root_folders(server_type):
 
 # ─── Download / Request API ───
 
+def _fulfill_book_request(request_entry, quality_profile_id, root_folder):
+    """Look up the book in Readarr (or fall back to Open Library data) and add it.
+    Mutates request_entry's status/readarr_book_id/error in place."""
+    client = get_client(request_entry["server_type"])
+    title = request_entry["title"]
+    author_name = request_entry["author"]
+    isbn = request_entry["isbn"]
+
+    try:
+        readarr_books = []
+        if isbn:
+            readarr_books = client.lookup_by_isbn(isbn)
+        if not readarr_books:
+            readarr_books = client.search_books(f"{title} {author_name}")
+
+        if readarr_books:
+            # Use the full Readarr lookup result — it has the correct
+            # editions, images, links, etc. that Readarr expects.
+            # We only override the author if Readarr returned empty data.
+            readarr_book = readarr_books[0]
+            if not readarr_book.get("author", {}).get("authorName"):
+                readarr_book["author"] = {
+                    "authorName": author_name,
+                    "foreignAuthorId": "",
+                }
+            app.logger.info(
+                "Readarr match for '%s': title='%s', author=%s",
+                title, readarr_book.get("title"), json.dumps(readarr_book.get("author", {})),
+            )
+        else:
+            # Fallback: build data from Open Library
+            readarr_book = {
+                "title": title,
+                "author": {
+                    "authorName": author_name,
+                    "foreignAuthorId": "",
+                },
+                "foreignBookId": isbn,
+            }
+            app.logger.info("No Readarr match, using Open Library fallback for '%s' by '%s'", title, author_name)
+
+        request_entry["status"] = "processing"
+        result = client.add_book(readarr_book, quality_profile_id, root_folder)
+        request_entry["readarr_book_id"] = result.get("id")
+    except Exception as e:
+        request_entry["status"] = "error"
+        request_entry["error"] = str(e)
+
+
+def _notify_pending_request(request_entry):
+    """Best-effort webhook to n8n so a Slack/email approval prompt goes out.
+    Never raises — a notification failure must not block request creation."""
+    webhook_url = os.environ.get("LIBRESEERR_N8N_WEBHOOK_URL")
+    if not webhook_url:
+        return
+    try:
+        http_requests.post(
+            webhook_url,
+            json={
+                "id": request_entry["id"],
+                "title": request_entry["title"],
+                "requestedBy": {"username": request_entry["requested_by"]},
+            },
+            timeout=5.0,
+        )
+    except Exception as e:
+        app.logger.warning("Failed to notify n8n of pending request %s: %s", request_entry["id"], e)
+
+
 @app.route("/api/request", methods=["POST"])
 @login_required
 def create_request():
@@ -1192,60 +1261,65 @@ def create_request():
         "cover_url": cover_url,
         "server_type": server_type,
         "quality_profile_id": quality_profile_id,
+        "root_folder": root_folder,
         "isbn": isbn,
         "status": "pending",
         "progress": 0,
         "error": None,
+        "requested_by": current_user.username,
         "created_at": datetime.utcnow().isoformat(),
     }
 
-    try:
-        # First, try to find the book in Readarr via ISBN lookup
-        readarr_books = []
-        if isbn:
-            readarr_books = client.lookup_by_isbn(isbn)
-        if not readarr_books:
-            readarr_books = client.search_books(f"{title} {author_name}")
-
-        if readarr_books:
-            # Use the full Readarr lookup result — it has the correct
-            # editions, images, links, etc. that Readarr expects.
-            # We only override the author if Readarr returned empty data.
-            readarr_book = readarr_books[0]
-            if not readarr_book.get("author", {}).get("authorName"):
-                readarr_book["author"] = {
-                    "authorName": author_name,
-                    "foreignAuthorId": "",
-                }
-            app.logger.info(
-                "Readarr match for '%s': title='%s', author=%s",
-                title, readarr_book.get("title"), json.dumps(readarr_book.get("author", {})),
-            )
-            request_entry["status"] = "processing"
-        else:
-            # Fallback: build data from Open Library
-            readarr_book = {
-                "title": title,
-                "author": {
-                    "authorName": author_name,
-                    "foreignAuthorId": "",
-                },
-                "foreignBookId": isbn or book_data.get("id", ""),
-            }
-            app.logger.info("No Readarr match, using Open Library fallback for '%s' by '%s'", title, author_name)
-            request_entry["status"] = "processing"
-
-        result = client.add_book(readarr_book, quality_profile_id, root_folder)
-        request_entry["readarr_book_id"] = result.get("id")
-    except Exception as e:
-        request_entry["status"] = "error"
-        request_entry["error"] = str(e)
+    if current_user.role == "admin":
+        _fulfill_book_request(request_entry, quality_profile_id, root_folder)
+    else:
+        _notify_pending_request(request_entry)
 
     with lock:
         requests_history.insert(0, request_entry)
         save_requests()
 
     return jsonify(request_entry)
+
+
+def _require_action_api_key(f):
+    """Auth for the approve/decline links sent via Slack/email — the clicker
+    has no Libreseerr session, so this checks a shared secret header instead."""
+    @wraps(f)
+    def decorated(*args, **kwargs):
+        expected = os.environ.get("LIBRESEERR_API_KEY")
+        if not expected or request.headers.get("X-Api-Key") != expected:
+            return jsonify({"error": "Invalid or missing API key"}), 401
+        return f(*args, **kwargs)
+    return decorated
+
+
+@app.route("/api/v1/request/<int:request_id>/approve", methods=["POST"])
+@_require_action_api_key
+def approve_request(request_id):
+    with lock:
+        entry = next((r for r in requests_history if r["id"] == request_id), None)
+        if not entry:
+            return jsonify({"error": "Request not found"}), 404
+        if entry["status"] != "pending":
+            return jsonify({"error": f"Request already {entry['status']}"}), 409
+        _fulfill_book_request(entry, entry["quality_profile_id"], entry["root_folder"])
+        save_requests()
+    return jsonify(entry)
+
+
+@app.route("/api/v1/request/<int:request_id>/decline", methods=["POST"])
+@_require_action_api_key
+def decline_request(request_id):
+    with lock:
+        entry = next((r for r in requests_history if r["id"] == request_id), None)
+        if not entry:
+            return jsonify({"error": "Request not found"}), 404
+        if entry["status"] != "pending":
+            return jsonify({"error": f"Request already {entry['status']}"}), 409
+        entry["status"] = "declined"
+        save_requests()
+    return jsonify(entry)
 
 
 @app.route("/api/requests", methods=["GET"])
@@ -1261,7 +1335,7 @@ def refresh_requests():
     """Refresh the status of all processing/downloading requests."""
     with lock:
         for req in requests_history:
-            if req["status"] in ("completed", "error"):
+            if req["status"] in ("completed", "error", "pending", "declined"):
                 continue
             client = get_client(req["server_type"])
             if not client:
