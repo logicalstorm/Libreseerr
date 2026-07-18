@@ -1323,8 +1323,21 @@ def decline_request(request_id):
     return jsonify(entry)
 
 
+def _login_or_api_key_required(f):
+    """Read-only variant of _require_action_api_key — accepts either a real
+    Libreseerr session (browser UI) or the shared X-Api-Key secret (Glen's
+    monthly admin report, which has no Libreseerr login of its own)."""
+    @wraps(f)
+    def decorated(*args, **kwargs):
+        expected = os.environ.get("LIBRESEERR_API_KEY")
+        if expected and request.headers.get("X-Api-Key") == expected:
+            return f(*args, **kwargs)
+        return login_required(f)(*args, **kwargs)
+    return decorated
+
+
 @app.route("/api/requests", methods=["GET"])
-@login_required
+@_login_or_api_key_required
 def get_requests():
     with lock:
         return jsonify(requests_history)
