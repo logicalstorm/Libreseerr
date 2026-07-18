@@ -1336,6 +1336,38 @@ def _login_or_api_key_required(f):
     return decorated
 
 
+@app.route("/api/users/import-from-jellyfin", methods=["POST"])
+@_require_action_api_key
+def import_jellyfin_user():
+    """Admin-triggered provisioning, called by Glen's create_user() flow —
+    mirrors the auto-create-on-first-login branch in api_login() exactly
+    (same password_hash: "jellyfin" sentinel, same default role), just
+    triggered at GOJ-account-creation time instead of waiting for the
+    person to log into Libreseerr themselves. Found 2026-07-18 during a
+    full account-sync audit: several real GOJ users had no Libreseerr
+    account at all because nothing proactively created one."""
+    data = request.json or {}
+    username = data.get("username", "").strip()
+    if not username:
+        return jsonify({"error": "username is required"}), 400
+
+    existing = next((u for u in users if u["username"] == username), None)
+    if existing:
+        return jsonify({"success": True, "username": username,
+                         "role": existing.get("role", "user"), "note": "already exists"}), 200
+
+    jellyfin = config.get("jellyfin", {})
+    new_user = {
+        "username": username,
+        "password_hash": "jellyfin",
+        "role": jellyfin.get("default_role", "user"),
+        "created_at": datetime.utcnow().isoformat(),
+    }
+    users.append(new_user)
+    save_users()
+    return jsonify({"success": True, "username": username, "role": new_user["role"]}), 201
+
+
 @app.route("/api/requests", methods=["GET"])
 @_login_or_api_key_required
 def get_requests():
