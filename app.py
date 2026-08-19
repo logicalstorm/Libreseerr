@@ -1212,13 +1212,21 @@ def _fulfill_book_request(request_entry, quality_profile_id, root_folder):
         request_entry["error"] = str(e)
 
 
-def _notify_pending_request(request_entry):
+def _notify_pending_request(request_entry: dict) -> None:
     """Best-effort webhook to Glen (reachable from Tower; n8n itself is not
     — see GOJ Users Admin.md) so a Slack/email approval prompt goes out.
-    Never raises — a notification failure must not block request creation."""
+    Never raises — a notification failure must not block request creation.
+
+    Glen's webhook receiver requires a Bearer secret on every path except
+    /receipts/archive and /media-integrity/flag (see glen_webhook.py's
+    do_POST) — this call was missing that header entirely, meaning it would
+    have 401'd the moment LIBRESEERR_NOTIFY_WEBHOOK_URL was ever actually
+    set. Fixed alongside adding the completion-webhook path below, which
+    needs the same header for the same reason."""
     webhook_url = os.environ.get("LIBRESEERR_NOTIFY_WEBHOOK_URL")
     if not webhook_url:
         return
+    headers = {"Authorization": f"Bearer {GLEN_WEBHOOK_SECRET}"} if GLEN_WEBHOOK_SECRET else {}
     try:
         http_requests.post(
             webhook_url,
@@ -1227,6 +1235,7 @@ def _notify_pending_request(request_entry):
                 "title": request_entry["title"],
                 "requestedBy": {"username": request_entry["requested_by"]},
             },
+            headers=headers,
             timeout=5.0,
         )
     except Exception as e:
@@ -1375,6 +1384,86 @@ def get_requests():
         return jsonify(requests_history)
 
 
+def _poll_request_status(req: dict) -> str:
+    """Checks one non-terminal request's server (Readarr/etc.) queue and
+    history for progress, mutating req in place. Returns the resulting
+    status. Shared by refresh_requests (browser-triggered) and
+    _background_completion_checker (runs with nobody watching) so completion
+    detection behaves identically either way — caller holds `lock`."""
+    client = get_client(req["server_type"])
+    if not client:
+        return req["status"]
+    try:
+        queue = client.get_queue()
+        req_book_id = req.get("readarr_book_id")
+        matching = [
+            q for q in queue
+            if q.get("title", "").lower() == req["title"].lower()
+            or (req_book_id and str(q.get("bookId")) == str(req_book_id))
+        ]
+        if matching:
+            q = matching[0]
+            status = q.get("status", "").lower()
+            size = q.get("size", 0)
+            size_left = q.get("sizeleft", 0)
+            # Book is in the download queue
+            req["status"] = "downloading"
+            if size > 0:
+                req["progress"] = round((1 - size_left / size) * 100)
+            if status == "completed":
+                req["status"] = "completed"
+                req["progress"] = 100
+            elif status in ("failed", "warning"):
+                req["status"] = "error"
+                req["error"] = q.get("errorMessage", "Download failed")
+        else:
+            # Check Readarr history
+            book_id = req.get("readarr_book_id")
+            if book_id:
+                book = client.get_book_status(book_id)
+                if book and book.get("statistics"):
+                    stats = book["statistics"]
+                    if stats.get("bookFileCount", 0) > 0:
+                        req["status"] = "completed"
+                        req["progress"] = 100
+    except Exception:
+        pass  # Keep current status on error
+    return req["status"]
+
+
+GLEN_COMPLETE_WEBHOOK_URL = os.environ.get("LIBRESEERR_COMPLETE_WEBHOOK_URL")
+GLEN_WEBHOOK_SECRET = os.environ.get("LIBRESEERR_GLEN_WEBHOOK_SECRET")
+COMPLETION_CHECK_INTERVAL_SECONDS = 600
+
+
+def _notify_completed_request(req: dict) -> None:
+    """Best-effort webhook to Glen so a 'your book is ready' email goes
+    out — mirrors Seerr's real MEDIA_AVAILABLE event, which Glen already
+    handles end-to-end (glen_webhook.py's handle_seerr_event). Libreseerr's
+    local accounts only ever have a Jellyfin username, not an email — Glen
+    resolves that itself via its own users table, same as every other
+    Jellyfin-authenticated GOJ service. Never raises — a notification
+    failure must not affect the request's own recorded status."""
+    if not GLEN_COMPLETE_WEBHOOK_URL:
+        return
+    media_type = "book" if req["server_type"] == "ebook" else "audiobook"
+    headers = {"Authorization": f"Bearer {GLEN_WEBHOOK_SECRET}"} if GLEN_WEBHOOK_SECRET else {}
+    try:
+        http_requests.post(
+            GLEN_COMPLETE_WEBHOOK_URL,
+            json={
+                "notification_type": "MEDIA_AVAILABLE",
+                "media": {"mediaType": media_type},
+                "subject": req["title"],
+                "request": {"requestedBy": {"username": req["requested_by"]}},
+            },
+            headers=headers,
+            timeout=10.0,
+        )
+    except Exception as e:
+        app.logger.warning("Failed to notify Glen of completed request %s: %s", req["id"], e)
+
+
 @app.route("/api/requests/refresh", methods=["POST"])
 @login_required
 def refresh_requests():
@@ -1383,46 +1472,35 @@ def refresh_requests():
         for req in requests_history:
             if req["status"] in ("completed", "error", "pending", "declined"):
                 continue
-            client = get_client(req["server_type"])
-            if not client:
-                continue
-            try:
-                queue = client.get_queue()
-                req_book_id = req.get("readarr_book_id")
-                matching = [
-                    q for q in queue
-                    if q.get("title", "").lower() == req["title"].lower()
-                    or (req_book_id and str(q.get("bookId")) == str(req_book_id))
-                ]
-                if matching:
-                    q = matching[0]
-                    status = q.get("status", "").lower()
-                    size = q.get("size", 0)
-                    size_left = q.get("sizeleft", 0)
-                    # Book is in the download queue
-                    req["status"] = "downloading"
-                    if size > 0:
-                        req["progress"] = round((1 - size_left / size) * 100)
-                    if status == "completed":
-                        req["status"] = "completed"
-                        req["progress"] = 100
-                    elif status in ("failed", "warning"):
-                        req["status"] = "error"
-                        req["error"] = q.get("errorMessage", "Download failed")
-                else:
-                    # Check Readarr history
-                    book_id = req.get("readarr_book_id")
-                    if book_id:
-                        book = client.get_book_status(book_id)
-                        if book and book.get("statistics"):
-                            stats = book["statistics"]
-                            if stats.get("bookFileCount", 0) > 0:
-                                req["status"] = "completed"
-                                req["progress"] = 100
-            except Exception as e:
-                pass  # Keep current status on error
+            if _poll_request_status(req) == "completed":
+                _notify_completed_request(req)
         save_requests()
     return jsonify(requests_history)
+
+
+def _background_completion_checker() -> None:
+    """Runs continuously in the background so a book/audiobook's completion
+    actually notifies the requester even when nobody has the Libreseerr UI
+    open to trigger refresh_requests via a browser poll — before this,
+    completions with no admin watching just silently sat there, since
+    /api/requests/refresh only ever ran on a logged-in page load. Safe under
+    gunicorn's single-worker config (see the deploy notes on --workers 1)
+    since only one process ever runs this loop."""
+    while True:
+        time.sleep(COMPLETION_CHECK_INTERVAL_SECONDS)
+        try:
+            with lock:
+                for req in requests_history:
+                    if req["status"] in ("completed", "error", "pending", "declined"):
+                        continue
+                    if _poll_request_status(req) == "completed":
+                        _notify_completed_request(req)
+                save_requests()
+        except Exception as e:
+            app.logger.warning("Background completion checker failed: %s", e)
+
+
+threading.Thread(target=_background_completion_checker, daemon=True).start()
 
 
 @app.route("/api/requests/<int:request_id>", methods=["DELETE"])
