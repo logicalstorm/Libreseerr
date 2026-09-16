@@ -345,7 +345,7 @@ def try_jellyfin_auth(username, password):
                 "X-Emby-Authorization": JELLYFIN_DEVICE_HEADER,
             },
             json={"Username": username, "Pw": password},
-            timeout=30,
+            timeout=60,
         )
         if resp.status_code == 200:
             return True, ""
