@@ -342,7 +342,7 @@ def try_jellyfin_auth(username, password):
             f"{server_url}/Users/AuthenticateByName",
             headers={
                 "Content-Type": "application/json",
-                "X-Emby-Authorization": JELLYFIN_DEVICE_HEADER,
+                "Authorization": JELLYFIN_DEVICE_HEADER,
             },
             json={"Username": username, "Pw": password},
             timeout=60,
