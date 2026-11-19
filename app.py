@@ -57,6 +57,18 @@ def _load_or_create_secret_key():
 
 app.secret_key = _load_or_create_secret_key()
 
+# GOJ's front-door gate (glen/gate_portal.py) sets a Flask cookie literally
+# named "session" on the whole .gallonsofjuice.stream domain. With the default
+# name, a browser that had signed into the homepage sent two "session" cookies
+# here, Flask read the gate's (wrong signature) and every Libreseerr login
+# bounced straight back to the sign-in page. Own names avoid the collision.
+app.config.update(
+    SESSION_COOKIE_NAME="libreseerr_session",
+    REMEMBER_COOKIE_NAME="libreseerr_remember",
+    SESSION_COOKIE_HTTPONLY=True,
+    SESSION_COOKIE_SAMESITE="Lax",
+)
+
 # Configure logging to stdout so it shows in docker logs
 logging.basicConfig(
     level=logging.DEBUG,
