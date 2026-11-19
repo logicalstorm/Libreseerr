@@ -32,11 +32,10 @@ class AudiobookshelfClient:
         book_libs = [lib["id"] for lib in libraries if lib.get("mediaType") == "book"]
         return book_libs or [lib["id"] for lib in libraries]
 
-    def get_available_titles(self) -> set:
-        """Every book/audiobook title currently in the library, lowercased —
-        same matching convention check_availability() already uses for the
-        Readarr/Bookshelf/LazyLibrarian title set."""
-        titles = set()
+    def get_title_index(self) -> dict:
+        """{lowercased title: library item id} for every book in the library.
+        The item id is what a "Listen now" link needs."""
+        index = {}
         for library_id in self._book_library_ids():
             resp = self.session.get(
                 f"{self.base_url}/api/libraries/{library_id}/items",
@@ -47,6 +46,12 @@ class AudiobookshelfClient:
             for item in resp.json().get("results", []):
                 metadata = item.get("media", {}).get("metadata", {})
                 title = metadata.get("title", "")
-                if title:
-                    titles.add(title.strip().lower())
-        return titles
+                if title and item.get("id"):
+                    index[title.strip().lower()] = item["id"]
+        return index
+
+    def get_available_titles(self) -> set:
+        """Every book/audiobook title currently in the library, lowercased —
+        same matching convention check_availability() already uses for the
+        Readarr/Bookshelf/LazyLibrarian title set."""
+        return set(self.get_title_index())

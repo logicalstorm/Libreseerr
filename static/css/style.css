@@ -1,19 +1,27 @@
 :root {
-    --bg-primary: #111827;
-    --bg-secondary: #1f2937;
-    --bg-card: #1f2937;
-    --bg-hover: #374151;
-    --pink-primary: #ec4899;
-    --pink-light: #f472b6;
-    --pink-dark: #db2777;
-    --pink-glow: rgba(236, 72, 153, 0.3);
-    --text-primary: #f3f4f6;
-    --text-secondary: #9ca3af;
-    --text-muted: #6b7280;
-    --border-color: #374151;
-    --success: #34d399;
-    --error: #f87171;
-    --warning: #fbbf24;
+    /* GOJ brand (Jack-Vault Knowledge/GOJ Branding.md) on Switchboard rules:
+       one accent, no gradients, state colours only when something needs a person. */
+    --bg-primary: #1A0A00;      /* Deep Dark: page ground, never pure black */
+    --bg-secondary: #2A1200;    /* Card Dark */
+    --bg-card: #2A1200;
+    --bg-hover: #3A1A06;        /* raised-2 */
+    --pink-primary: #F4731A;    /* Pulp Orange: the one accent */
+    --pink-light: #FF9A42;      /* Squeeze: hover */
+    --pink-dark: #F4731A;
+    --pink-glow: rgba(244, 115, 26, 0.16);
+    --accent-tint: rgba(244, 115, 26, 0.16);
+    --on-accent: #1A0A00;
+    --text-primary: #FFF8E7;    /* Cream */
+    --text-secondary: #C4885A;  /* muted */
+    --text-muted: #C4885A;
+    --text-dim: #7A5030;
+    --border-color: #5C3010;
+    --success: #6FBF73;
+    --success-tint: rgba(111, 191, 115, 0.16);
+    --error: #E8705A;
+    --error-tint: rgba(232, 112, 90, 0.14);
+    --warning: #FFD447;         /* Pulp Yellow */
+    --scrim: rgba(26, 10, 0, 0.72);
     --sidebar-width: 16rem;
     --header-height: 4rem;
 }
@@ -21,7 +29,7 @@
 * { margin: 0; padding: 0; box-sizing: border-box; }
 
 body {
-    font-family: 'Inter', -apple-system, BlinkMacSystemFont, sans-serif;
+    font-family: 'Nunito', -apple-system, 'Segoe UI', Roboto, system-ui, sans-serif;
     background: var(--bg-primary);
     color: var(--text-primary);
     min-height: 100vh;
@@ -51,7 +59,7 @@ body.is-admin .sidebar-link.admin-only {
     left: 0;
     width: var(--sidebar-width);
     height: 100vh;
-    background: linear-gradient(to bottom, #1a0a1e, #1f1028);
+    background: var(--bg-secondary);
     border-right: 1px solid var(--border-color);
     display: flex;
     flex-direction: column;
@@ -64,7 +72,7 @@ body.is-admin .sidebar-link.admin-only {
     display: none;
     position: fixed;
     inset: 0;
-    background: rgba(0, 0, 0, 0.5);
+    background: var(--scrim);
     z-index: 140;
 }
 
@@ -114,7 +122,7 @@ body.is-admin .sidebar-link.admin-only {
 
 .sidebar-link.active {
     color: white;
-    background: linear-gradient(to bottom right, var(--pink-dark), #a855f7);
+    background: var(--pink-primary);
 }
 
 .sidebar-icon {
@@ -150,13 +158,13 @@ body.is-admin .sidebar-link.admin-only {
     text-transform: uppercase;
     padding: 0.1rem 0.35rem;
     border-radius: 0.25rem;
-    background: rgba(236, 72, 153, 0.15);
+    background: var(--bg-hover);
     color: var(--pink-light);
 }
 
 body.is-admin .sidebar-role {
-    background: rgba(168, 85, 247, 0.15);
-    color: #c084fc;
+    background: var(--accent-tint);
+    color: var(--pink-light);
 }
 
 .sidebar-logout {
@@ -193,7 +201,7 @@ body.is-admin .sidebar-role {
     position: sticky;
     top: 0;
     height: var(--header-height);
-    background: rgba(17, 24, 39, 0.8);
+    background: var(--bg-primary);
     backdrop-filter: blur(12px);
     -webkit-backdrop-filter: blur(12px);
     border-bottom: 1px solid var(--border-color);
@@ -288,7 +296,7 @@ body.is-admin .sidebar-role {
 
 .book-card:hover {
     transform: scale(1.05);
-    box-shadow: 0 10px 25px rgba(0, 0, 0, 0.4);
+    box-shadow: none;
     z-index: 2;
 }
 
@@ -307,7 +315,7 @@ body.is-admin .sidebar-role {
 .book-overlay {
     position: absolute;
     inset: 0;
-    background: linear-gradient(to top, rgba(0, 0, 0, 0.85) 0%, rgba(0, 0, 0, 0.3) 50%, transparent 100%);
+    background: var(--scrim);
     opacity: 0;
     transition: opacity 0.3s ease-in-out;
     display: flex;
@@ -371,12 +379,12 @@ body.is-admin .sidebar-role {
 }
 
 .btn-primary {
-    background: linear-gradient(to bottom right, var(--pink-primary), var(--pink-dark));
+    background: var(--pink-primary);
     color: white;
 }
 
 .btn-primary:hover {
-    background: linear-gradient(to bottom right, var(--pink-dark), #9d174d);
+    background: var(--pink-primary);
 }
 
 .btn-secondary {
@@ -391,14 +399,14 @@ body.is-admin .sidebar-role {
 
 .btn-small { padding: 0.35rem 0.7rem; font-size: 0.75rem; }
 .btn-danger { background: var(--error); color: white; }
-.btn-danger:hover { background: #dc2626; }
+.btn-danger:hover { opacity: 0.85; }
 
 /* ─── Modal ─── */
 .modal {
     display: none;
     position: fixed;
     inset: 0;
-    background: rgba(0, 0, 0, 0.6);
+    background: var(--scrim);
     backdrop-filter: blur(4px);
     z-index: 200;
     align-items: center;
@@ -500,7 +508,7 @@ body.is-admin .sidebar-role {
 .server-btn:last-child { border-radius: 0 0.5rem 0.5rem 0; }
 
 .server-btn.active {
-    background: linear-gradient(to bottom right, var(--pink-primary), var(--pink-dark));
+    background: var(--pink-primary);
     color: white;
     border-color: var(--pink-primary);
 }
@@ -606,8 +614,8 @@ body.is-admin .sidebar-role {
     margin-top: 0.25rem;
 }
 
-.request-server.ebook { background: rgba(236, 72, 153, 0.15); color: var(--pink-light); }
-.request-server.audiobook { background: rgba(168, 85, 247, 0.15); color: #c084fc; }
+.request-server.ebook { background: var(--bg-hover); color: var(--pink-light); }
+.request-server.audiobook { background: var(--accent-tint); color: var(--pink-light); }
 
 .book-badges {
     display: flex;
@@ -623,10 +631,10 @@ body.is-admin .sidebar-role {
     font-weight: 600;
     text-transform: uppercase;
 }
-.book-badge.ebook { background: rgba(236, 72, 153, 0.15); color: var(--pink-light); }
-.book-badge.audiobook { background: rgba(168, 85, 247, 0.15); color: #c084fc; }
-.book-badge.ebook-requested { background: rgba(236, 72, 153, 0.08); color: var(--pink-light); opacity: 0.7; }
-.book-badge.audiobook-requested { background: rgba(168, 85, 247, 0.08); color: #c084fc; opacity: 0.7; }
+.book-badge.ebook { background: var(--bg-hover); color: var(--pink-light); }
+.book-badge.audiobook { background: var(--accent-tint); color: var(--pink-light); }
+.book-badge.ebook-requested { background: var(--bg-hover); color: var(--pink-light); opacity: 0.7; }
+.book-badge.audiobook-requested { background: var(--accent-tint); color: var(--pink-light); opacity: 0.7; }
 
 .request-status { text-align: right; flex-shrink: 0; }
 
@@ -641,7 +649,7 @@ body.is-admin .sidebar-role {
 
 .progress-fill {
     height: 100%;
-    background: linear-gradient(to right, var(--pink-primary), var(--pink-light));
+    background: var(--pink-primary);
     border-radius: 3px;
     transition: width 0.5s;
 }
@@ -714,7 +722,7 @@ body.is-admin .sidebar-role {
     width: 40px;
     height: 40px;
     border-radius: 50%;
-    background: linear-gradient(to bottom right, var(--pink-dark), #a855f7);
+    background: var(--pink-primary);
     display: flex;
     align-items: center;
     justify-content: center;
@@ -748,12 +756,12 @@ body.is-admin .sidebar-role {
 }
 
 .user-role-badge.admin {
-    background: rgba(168, 85, 247, 0.15);
-    color: #c084fc;
+    background: var(--accent-tint);
+    color: var(--pink-light);
 }
 
 .user-role-badge.user {
-    background: rgba(236, 72, 153, 0.15);
+    background: var(--bg-hover);
     color: var(--pink-light);
 }
 
@@ -764,8 +772,8 @@ body.is-admin .sidebar-role {
 }
 
 .user-modal-error {
-    background: rgba(248, 113, 113, 0.1);
-    border: 1px solid rgba(248, 113, 113, 0.3);
+    background: var(--error-tint);
+    border: 1px solid var(--error);
     color: var(--error);
     padding: 0.625rem;
     border-radius: 0.5rem;
@@ -885,4 +893,63 @@ body.is-admin .sidebar-role {
         min-width: 9rem;
         max-width: 9rem;
     }
+}
+
+
+/* ─── GOJ Books: request flow (2026-11-18) ─── */
+.btn-primary { color: var(--on-accent); font-weight: 700; }
+.btn-primary:hover { background: var(--pink-light); }
+.btn:focus-visible, .server-btn:focus-visible { outline: 2px solid var(--pink-light); outline-offset: 2px; }
+.btn, .server-btn { min-height: 44px; }
+
+.sidebar-brand span, .brand-wordmark {
+    font-family: 'Luckiest Guy', 'Nunito', sans-serif;
+    letter-spacing: 0.04em;
+    color: var(--pink-primary);
+    font-weight: 400;
+}
+
+.modal-hint { color: var(--text-secondary); font-size: 0.9375rem; line-height: 1.35; margin-top: 0.75rem; }
+.modal-book { display: flex; gap: 1rem; align-items: flex-start; margin-bottom: 1.25rem; }
+.modal-book img { width: 64px; height: 96px; object-fit: cover; border-radius: 8px; background: var(--bg-hover); flex-shrink: 0; }
+.modal-book-title { font-size: 1.125rem; font-weight: 700; color: var(--text-primary); line-height: 1.3; }
+.modal-book-author { color: var(--text-secondary); margin-top: 0.25rem; }
+.listen-box {
+    background: var(--success-tint);
+    border: 1px solid var(--success);
+    border-radius: 12px;
+    padding: 0.75rem 1rem;
+    color: var(--text-primary);
+    margin-top: 0.75rem;
+}
+.listen-box a { color: var(--success); font-weight: 700; }
+
+.page-intro { color: var(--text-secondary); margin: -0.5rem 0 1.25rem; font-size: 0.9375rem; }
+.request-state { font-weight: 700; font-size: 0.9375rem; }
+.request-state.waiting, .request-state.searching { color: var(--text-primary); }
+.request-state.downloading { color: var(--pink-light); }
+.request-state.ready { color: var(--success); }
+.request-state.problem { color: var(--error); }
+.request-state.declined { color: var(--text-secondary); }
+.request-sub { color: var(--text-secondary); font-size: 0.8125rem; margin-top: 0.25rem; max-width: 18rem; }
+.request-by { color: var(--text-secondary); font-size: 0.8125rem; }
+.request-actions { display: flex; gap: 0.5rem; justify-content: flex-end; margin-top: 0.5rem; flex-wrap: wrap; }
+.btn-listen { background: var(--success); color: var(--on-accent); font-weight: 700; text-decoration: none; display: inline-flex; align-items: center; padding: 0 1rem; border-radius: 8px; }
+.btn-quiet { background: transparent; border: 1px solid var(--border-color); color: var(--text-secondary); }
+.btn-quiet:hover { color: var(--text-primary); border-color: var(--text-secondary); }
+
+@media (max-width: 640px) {
+    .request-item { flex-wrap: wrap; }
+    .request-status { width: 100%; text-align: left; align-items: flex-start; }
+    .request-actions { justify-content: flex-start; }
+}
+
+.server-btn.active { color: var(--on-accent); font-weight: 700; }
+.sidebar-link.active { color: var(--on-accent); font-weight: 700; }
+.sidebar-link.active .sidebar-icon { stroke: var(--on-accent); }
+.sidebar-role:empty { display: none; }
+.book-cover-blank {
+    display: flex; align-items: center; justify-content: center; text-align: center;
+    padding: 1rem; background: var(--bg-hover); color: var(--text-secondary);
+    font-weight: 700; font-size: 0.9375rem; line-height: 1.3;
 }

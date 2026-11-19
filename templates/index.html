@@ -3,11 +3,11 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Libreseerr</title>
+    <title>GOJ Books</title>
     <link rel="icon" type="image/x-icon" href="/static/favicon.ico">
-    <link rel="stylesheet" href="/static/css/style.css">
+    <link rel="stylesheet" href="/static/css/style.css?v=20261118">
     <link rel="preconnect" href="https://fonts.googleapis.com">
-    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+    <link href="https://fonts.googleapis.com/css2?family=Luckiest+Guy&family=Nunito:wght@400;700&display=swap" rel="stylesheet">
 </head>
 <body>
     <!-- Sidebar Overlay (mobile) -->
@@ -16,8 +16,7 @@
     <!-- Sidebar -->
     <aside id="sidebar" class="sidebar">
         <div class="sidebar-brand">
-            <img src="/static/LibreseerrLogo.png" alt="Libreseerr" class="sidebar-logo">
-            <span>Libreseerr</span>
+            <span>GOJ Books</span>
         </div>
         <nav class="sidebar-nav">
             <a href="#" class="sidebar-link active" data-page="search">
@@ -30,7 +29,7 @@
                 <svg class="sidebar-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
                     <circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/>
                 </svg>
-                <span>Requests</span>
+                <span>My requests</span>
             </a>
             <a href="#" class="sidebar-link admin-only" data-page="users">
                 <svg class="sidebar-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
@@ -72,7 +71,7 @@
                 <svg class="header-search-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
                     <circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/>
                 </svg>
-                <input type="text" id="search-input" placeholder="Search for books..." autocomplete="off">
+                <input type="text" id="search-input" placeholder="Search a title or author" autocomplete="off">
             </div>
         </header>
 
@@ -86,9 +85,10 @@
             <!-- Requests Page -->
             <div id="page-requests" class="page">
                 <div class="page-header">
-                    <h2>Request History</h2>
-                    <button id="refresh-btn" class="btn btn-secondary">Refresh Status</button>
+                    <h2 id="requests-heading">My requests</h2>
+                    <button id="refresh-btn" class="btn btn-quiet">Check again</button>
                 </div>
+                <p class="page-intro" id="requests-intro">Most audiobooks arrive within a day. We email you when yours is ready.</p>
                 <div id="requests-list" class="requests-list"></div>
             </div>
 
@@ -324,29 +324,30 @@
     <div id="download-modal" class="modal">
         <div class="modal-content">
             <div class="modal-header">
-                <h3 id="modal-title">Download Book</h3>
-                <button class="modal-close" onclick="closeModal()">&times;</button>
+                <h3 id="modal-title">Request a book</h3>
+                <button class="modal-close" onclick="closeModal()" aria-label="Close">&times;</button>
             </div>
             <div class="modal-body">
-                <div class="form-group">
-                    <label>Download Server</label>
-                    <div class="server-select">
-                        <button class="server-btn active" data-server="ebook">Ebook</button>
-                        <button class="server-btn" data-server="audiobook">Audiobook</button>
+                <div class="modal-book">
+                    <img id="modal-cover" alt="">
+                    <div>
+                        <div class="modal-book-title" id="modal-book-title"></div>
+                        <div class="modal-book-author" id="modal-book-author"></div>
                     </div>
                 </div>
                 <div class="form-group">
-                    <label for="quality-profile">Quality Profile</label>
-                    <select id="quality-profile"><option>Loading...</option></select>
+                    <label>Format</label>
+                    <div class="server-select">
+                        <button class="server-btn active" data-server="audiobook">Audiobook</button>
+                        <button class="server-btn" data-server="ebook">eBook</button>
+                    </div>
                 </div>
-                <div class="form-group">
-                    <label for="root-folder">Root Folder</label>
-                    <select id="root-folder"><option>Loading...</option></select>
-                </div>
+                <div id="modal-listen" class="listen-box" style="display:none"></div>
+                <p class="modal-hint" id="modal-hint"></p>
             </div>
             <div class="modal-footer">
-                <button class="btn btn-secondary" onclick="closeModal()">Cancel</button>
-                <button class="btn btn-primary" id="confirm-download-btn">Download</button>
+                <button class="btn btn-quiet" onclick="closeModal()">Cancel</button>
+                <button class="btn btn-primary" id="confirm-download-btn">Request audiobook</button>
             </div>
         </div>
     </div>
@@ -384,6 +385,6 @@
         </div>
     </div>
 
-    <script src="/static/js/app.js"></script>
+    <script src="/static/js/app.js?v=20261118"></script>
 </body>
 </html>
