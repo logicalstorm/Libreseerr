@@ -6,6 +6,29 @@ import requests
 
 logger = logging.getLogger(__name__)
 
+# findBook/addBook hit Goodreads/Google upstream and routinely take 20-40s;
+# the old flat 15s timeout made requests fail with "Could not find book ID".
+DEFAULT_TIMEOUT_SECONDS = 15
+LOOKUP_TIMEOUT_SECONDS = 90
+
+# LazyLibrarian's per-book Status/AudioStatus values -> Libreseerr request status.
+# "Open"/"Have" mean the file is in the library; "Snatched" means a download
+# client has it; "Wanted" means it is queued and LazyLibrarian is searching.
+LL_STATUS_MAP = {
+    "Open": "completed",
+    "Have": "completed",
+    "Processed": "completed",
+    "Snatched": "downloading",
+    "Seeding": "downloading",
+    "Wanted": "processing",
+    "Failed": "error",
+}
+
+
+def ll_type_for(server_type: str) -> str:
+    """LazyLibrarian's own name for the library a request targets."""
+    return "AudioBook" if server_type == "audiobook" else "eBook"
+
 
 class LazyLibrarianClient:
     """Client for interacting with a LazyLibrarian instance."""
@@ -15,11 +38,11 @@ class LazyLibrarianClient:
         self.api_key = api_key
         self.session = requests.Session()
 
-    def _get(self, cmd: str, **params) -> dict | list | str:
+    def _get(self, cmd: str, timeout: int = DEFAULT_TIMEOUT_SECONDS, **params) -> dict | list | str:
         """Make a GET request to the LazyLibrarian API."""
         query = {"apikey": self.api_key, "cmd": cmd}
         query.update(params)
-        resp = self.session.get(f"{self.base_url}/api", params=query, timeout=15)
+        resp = self.session.get(f"{self.base_url}/api", params=query, timeout=timeout)
         resp.raise_for_status()
         try:
             return resp.json()
@@ -39,7 +62,7 @@ class LazyLibrarianClient:
 
     def search_books(self, query: str) -> list:
         """Search for books by name using findBook."""
-        result = self._get("findBook", name=query)
+        result = self._get("findBook", timeout=LOOKUP_TIMEOUT_SECONDS, name=query)
         if not isinstance(result, list):
             return []
         return [
@@ -60,7 +83,7 @@ class LazyLibrarianClient:
 
     def lookup_by_isbn(self, isbn: str) -> list:
         """Look up a book by ISBN using searchItem."""
-        result = self._get("searchItem", item=isbn)
+        result = self._get("searchItem", timeout=LOOKUP_TIMEOUT_SECONDS, item=isbn)
         if not isinstance(result, list):
             return []
         return [
@@ -99,13 +122,18 @@ class LazyLibrarianClient:
         """Return a synthetic root folder since LazyLibrarian manages its own paths."""
         return [{"path": "/books"}]
 
-    def add_book(self, book_data: dict, quality_profile_id: int, root_folder: str) -> dict:
-        """Add a book to LazyLibrarian and mark it as wanted."""
+    def add_book(self, book_data: dict, quality_profile_id: int, root_folder: str,
+                 server_type: str = "ebook") -> dict:
+        """Add a book to LazyLibrarian, mark the right library (eBook or
+        AudioBook) as Wanted, and kick off an immediate search.
+
+        Before 2026-11-18 this always queued type=eBook, so every audiobook
+        request quietly searched for an ebook instead."""
         book_id = book_data.get("foreignBookId", "")
         title = book_data.get("title", "Unknown")
+        ll_type = ll_type_for(server_type)
 
         if not book_id:
-            # Try to find the book first
             results = self.search_books(f"{title} {book_data.get('author', {}).get('authorName', '')}")
             if results:
                 book_id = results[0].get("foreignBookId", "")
@@ -113,19 +141,37 @@ class LazyLibrarianClient:
         if not book_id:
             raise ValueError(f"Could not find book ID for '{title}' in LazyLibrarian")
 
-        # Add the book to the database
-        logger.info("Adding book to LazyLibrarian: '%s' (id=%s)", title, book_id)
-        add_result = self._get("addBook", id=book_id)
+        logger.info("Adding book to LazyLibrarian: '%s' (id=%s, type=%s)", title, book_id, ll_type)
+        add_result = self._get("addBook", timeout=LOOKUP_TIMEOUT_SECONDS, id=book_id, wait=1)
         logger.info("addBook result: %s", add_result)
 
-        # Mark the book as wanted to trigger a search
-        queue_result = self._get("queueBook", id=book_id, type="eBook")
+        queue_result = self._get("queueBook", id=book_id, type=ll_type)
         logger.info("queueBook result: %s", queue_result)
+
+        try:
+            search_result = self._get("searchBook", id=book_id, type=ll_type)
+            logger.info("searchBook result: %s", search_result)
+        except requests.RequestException as e:
+            # The hourly search will still pick it up; don't fail the request.
+            logger.warning("searchBook for %s failed (will rely on scheduled search): %s", book_id, e)
 
         return {
             "id": book_id,
             "title": title,
             "foreignBookId": book_id,
+        }
+
+    def get_book_statuses(self) -> dict:
+        """{BookID: {"eBook": Status, "AudioBook": AudioStatus}} for every
+        book LazyLibrarian tracks — one call per poll cycle instead of one
+        per request."""
+        result = self._get("getAllBooks", timeout=LOOKUP_TIMEOUT_SECONDS)
+        if not isinstance(result, list):
+            return {}
+        return {
+            str(b.get("BookID", "")): {"eBook": b.get("Status", ""), "AudioBook": b.get("AudioStatus", "")}
+            for b in result
+            if b.get("BookID")
         }
 
     def get_queue(self) -> list:

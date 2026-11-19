@@ -27,8 +27,9 @@ except ImportError:
 
 from bookshelf import BookshelfClient
 from readarr import ReadarrClient
-from lazylibrarian import LazyLibrarianClient
+from lazylibrarian import LL_STATUS_MAP, LazyLibrarianClient, ll_type_for
 from audiobookshelf import AudiobookshelfClient
+from book_matching import best_match, find_in_library, norm_title, same_user
 
 app = Flask(__name__)
 
@@ -76,6 +77,9 @@ logging.basicConfig(
     handlers=[logging.StreamHandler(sys.stdout)],
 )
 app.logger.setLevel(logging.DEBUG)
+# urllib3's DEBUG lines print full request URLs, and LazyLibrarian takes its
+# API key as a query parameter — keep those out of `docker logs`.
+logging.getLogger("urllib3").setLevel(logging.WARNING)
 
 CONFIG_FILE = os.path.join(os.path.dirname(__file__), "data", "config.json")
 REQUESTS_FILE = os.path.join(os.path.dirname(__file__), "data", "requests.json")
@@ -124,12 +128,20 @@ class User:
         return self.username
 
 
+def find_user(username):
+    """Case-insensitive lookup. Jellyfin accepts "Justin@x.com" and
+    "justin@x.com" as the same login, and before 2026-11-18 Libreseerr
+    created a second account for the other capitalisation."""
+    exact = next((u for u in users if u["username"] == username), None)
+    if exact:
+        return exact
+    return next((u for u in users if same_user(u["username"], username)), None)
+
+
 @login_manager.user_loader
 def load_user(username):
-    for u in users:
-        if u["username"] == username:
-            return User(u)
-    return None
+    u = find_user(username)
+    return User(u) if u else None
 
 
 @login_manager.unauthorized_handler
@@ -404,10 +416,10 @@ def api_login():
     if not username or not password:
         return jsonify({"error": "Username and password are required"}), 400
 
-    for u in users:
-        if u["username"] == username and check_password_hash(u["password_hash"], password):
-            login_user(User(u))
-            return jsonify({"success": True, "username": u["username"], "role": u.get("role", "user")})
+    local = find_user(username)
+    if local and local["password_hash"] not in ("ldap", "jellyfin")             and check_password_hash(local["password_hash"], password):
+        login_user(User(local))
+        return jsonify({"success": True, "username": local["username"], "role": local.get("role", "user")})
 
     # Fall through to LDAP if configured
     ldap = config.get("ldap", {})
@@ -416,7 +428,7 @@ def api_login():
         success, _user_dn, error = try_ldap_auth(username, password)
         app.logger.info("LDAP result: success=%s, dn=%s, error=%s", success, _user_dn, error)
         if success:
-            existing = next((u for u in users if u["username"] == username), None)
+            existing = find_user(username)
             if not existing:
                 existing = {
                     "username": username,
@@ -439,7 +451,7 @@ def api_login():
         success, error = try_jellyfin_auth(username, password)
         app.logger.info("Jellyfin auth result: success=%s, error=%s", success, error)
         if success:
-            existing = next((u for u in users if u["username"] == username), None)
+            existing = find_user(username)
             if not existing:
                 existing = {
                     "username": username,
@@ -1109,14 +1121,11 @@ def check_availability():
     # audiobooks arrive via a Libation-export pipeline the download manager
     # above never sees, so relying on it alone misses most of what's
     # actually already available to listen to.
-    abs_client = get_audiobookshelf_client()
-    if abs_client:
-        try:
-            result["audiobook"]["titles"] = list(
-                set(result["audiobook"]["titles"]) | abs_client.get_available_titles()
-            )
-        except Exception as e:
-            app.logger.warning("Failed to get titles from Audiobookshelf: %s", e)
+    abs_index = _abs_title_index()
+    result["audiobook"]["titles"] = list(set(result["audiobook"]["titles"]) | set(abs_index))
+    # Normalised title -> "Listen now" link, so the UI can send people
+    # straight to a book that's already here instead of letting them request it.
+    result["listen"] = {norm_title(t): listen_url(i) for t, i in abs_index.items() if listen_url(i)}
 
     # Also include books with active requests (pending/processing/downloading)
     active_statuses = {"pending", "processing", "downloading"}
@@ -1191,10 +1200,10 @@ def _fulfill_book_request(request_entry, quality_profile_id, root_folder):
             readarr_books = client.search_books(f"{title} {author_name}")
 
         if readarr_books:
-            # Use the full Readarr lookup result — it has the correct
-            # editions, images, links, etc. that Readarr expects.
-            # We only override the author if Readarr returned empty data.
-            readarr_book = readarr_books[0]
+            # Use the full lookup result — it has the correct editions,
+            # images, links, etc. the server expects. findBook often ranks
+            # a junk record first, so pick by author + title, not position.
+            readarr_book = best_match(readarr_books, title, author_name)
             if not readarr_book.get("author", {}).get("authorName"):
                 readarr_book["author"] = {
                     "authorName": author_name,
@@ -1217,7 +1226,12 @@ def _fulfill_book_request(request_entry, quality_profile_id, root_folder):
             app.logger.info("No Readarr match, using Open Library fallback for '%s' by '%s'", title, author_name)
 
         request_entry["status"] = "processing"
-        result = client.add_book(readarr_book, quality_profile_id, root_folder)
+        request_entry["error"] = None
+        if isinstance(client, LazyLibrarianClient):
+            result = client.add_book(readarr_book, quality_profile_id, root_folder,
+                                     server_type=request_entry["server_type"])
+        else:
+            result = client.add_book(readarr_book, quality_profile_id, root_folder)
         request_entry["readarr_book_id"] = result.get("id")
     except Exception as e:
         request_entry["status"] = "error"
@@ -1254,16 +1268,45 @@ def _notify_pending_request(request_entry: dict) -> None:
         app.logger.warning("Failed to notify n8n of pending request %s: %s", request_entry["id"], e)
 
 
+def _default_target(client):
+    """LazyLibrarian has no real quality profiles/root folders, and users
+    should never be asked about them — use the server's first option."""
+    try:
+        profile = (client.get_quality_profiles() or [{"id": 1}])[0]["id"]
+        folder = (client.get_root_folders() or [{"path": "/books"}])[0]["path"]
+    except Exception:
+        profile, folder = 1, "/books"
+    return profile, folder
+
+
+def _abs_title_index() -> dict:
+    abs_client = get_audiobookshelf_client()
+    if not abs_client:
+        return {}
+    try:
+        return abs_client.get_title_index()
+    except Exception as e:
+        app.logger.warning("Audiobookshelf title index failed: %s", e)
+        return {}
+
+
+def listen_url(item_id):
+    """Public Audiobookshelf link for a library item, if configured."""
+    base = os.environ.get("LIBRESEERR_LISTEN_BASE_URL", "").rstrip("/")
+    return f"{base}/item/{item_id}" if base and item_id else None
+
+
+ACTIVE_STATUSES = ("pending", "processing", "downloading")
+
+
 @app.route("/api/request", methods=["POST"])
 @login_required
 def create_request():
-    data = request.json
-    server_type = data.get("server_type")
+    data = request.json or {}
+    server_type = data.get("server_type") or "audiobook"
     book_data = data.get("book")
-    quality_profile_id = data.get("quality_profile_id")
-    root_folder = data.get("root_folder")
 
-    if not all([server_type, book_data, quality_profile_id, root_folder]):
+    if server_type not in ("ebook", "audiobook") or not book_data:
         return jsonify({"error": "Missing required fields"}), 400
 
     client = get_client(server_type)
@@ -1275,6 +1318,23 @@ def create_request():
     author_name = authors[0] if authors else "Unknown"
     cover_url = book_data.get("cover", "")
     isbn = book_data.get("isbn_13") or book_data.get("isbn_10", "")
+
+    if server_type == "audiobook":
+        item_id = find_in_library(title, _abs_title_index())
+        if item_id:
+            return jsonify({"error": "already_available", "listen_url": listen_url(item_id)}), 409
+
+    with lock:
+        for existing in requests_history:
+            if (existing.get("server_type") == server_type
+                    and existing.get("status") in ACTIVE_STATUSES
+                    and norm_title(existing.get("title", "")) == norm_title(title)):
+                return jsonify({**existing, "duplicate": True})
+
+    quality_profile_id = data.get("quality_profile_id")
+    root_folder = data.get("root_folder")
+    if not quality_profile_id or not root_folder:
+        quality_profile_id, root_folder = _default_target(client)
 
     request_entry = {
         "id": int(time.time() * 1000),
@@ -1372,7 +1432,7 @@ def import_jellyfin_user():
     if not username:
         return jsonify({"error": "username is required"}), 400
 
-    existing = next((u for u in users if u["username"] == username), None)
+    existing = find_user(username)
     if existing:
         return jsonify({"success": True, "username": username,
                          "role": existing.get("role", "user"), "note": "already exists"}), 200
@@ -1389,22 +1449,116 @@ def import_jellyfin_user():
     return jsonify({"success": True, "username": username, "role": new_user["role"]}), 201
 
 
+def _visible_requests() -> list:
+    """Admins and Glen's API key see everything; a regular user sees only
+    their own requests (before 2026-11-18 everyone saw, and could remove,
+    everyone else's)."""
+    if not current_user.is_authenticated or current_user.role == "admin":
+        return list(requests_history)
+    return [r for r in requests_history if same_user(r.get("requested_by", ""), current_user.username)]
+
+
+def _can_manage(req: dict) -> bool:
+    return current_user.role == "admin" or same_user(req.get("requested_by", ""), current_user.username)
+
+
+def _with_links(reqs: list) -> list:
+    return [{**r, "listen_url": listen_url(r.get("abs_item_id"))} for r in reqs]
+
+
 @app.route("/api/requests", methods=["GET"])
 @_login_or_api_key_required
 def get_requests():
     with lock:
-        return jsonify(requests_history)
+        return jsonify(_with_links(_visible_requests()))
 
 
-def _poll_request_status(req: dict) -> str:
-    """Checks one non-terminal request's server (Readarr/etc.) queue and
-    history for progress, mutating req in place. Returns the resulting
-    status. Shared by refresh_requests (browser-triggered) and
-    _background_completion_checker (runs with nobody watching) so completion
-    detection behaves identically either way — caller holds `lock`."""
+@app.route("/api/requests/<int:request_id>/retry", methods=["POST"])
+@login_required
+def retry_request(request_id):
+    """Try a failed request again. An admin's retry goes straight to the
+    download manager; a user's retry goes back for approval."""
+    with lock:
+        entry = next((r for r in requests_history if r["id"] == request_id), None)
+        if not entry or not _can_manage(entry):
+            return jsonify({"error": "Request not found"}), 404
+        if entry["status"] != "error":
+            return jsonify({"error": f"Request is {entry['status']}, not failed"}), 409
+        entry["error"] = None
+        if current_user.role == "admin":
+            _fulfill_book_request(entry, entry.get("quality_profile_id", 1), entry.get("root_folder", "/books"))
+        else:
+            entry["status"] = "pending"
+            _notify_pending_request(entry)
+        save_requests()
+        return jsonify(_with_links([entry])[0])
+
+
+STALE_UNTRACKED_DAYS = 14
+
+
+def _build_poll_context() -> dict:
+    """Fetch everything a poll cycle needs once, not once per request."""
+    ctx = {"abs_index": _abs_title_index(), "ll_statuses": {}}
+    for server_type in ("ebook", "audiobook"):
+        client = get_client(server_type)
+        if isinstance(client, LazyLibrarianClient) and not ctx["ll_statuses"]:
+            try:
+                ctx["ll_statuses"] = client.get_book_statuses()
+            except Exception as e:
+                app.logger.warning("LazyLibrarian status fetch failed: %s", e)
+    return ctx
+
+
+def _age_days(req: dict) -> float:
+    try:
+        return (datetime.utcnow() - datetime.fromisoformat(req["created_at"])).total_seconds() / 86400
+    except (KeyError, ValueError):
+        return 0.0
+
+
+def _poll_lazylibrarian(req: dict, ctx: dict) -> str:
+    """Map LazyLibrarian's own per-book status onto the request."""
+    book = ctx.get("ll_statuses", {}).get(str(req.get("readarr_book_id", "")))
+    if book is None:
+        # Requests from the Readarr era carry ids LazyLibrarian never saw;
+        # without this they spin as "processing" forever.
+        if ctx.get("ll_statuses") and _age_days(req) > STALE_UNTRACKED_DAYS:
+            req["status"] = "error"
+            req["error"] = "The downloader lost track of this one. Try again."
+        return req["status"]
+    mapped = LL_STATUS_MAP.get(book.get(ll_type_for(req["server_type"]), ""))
+    if mapped == "completed" and req["server_type"] == "audiobook":
+        mapped = "downloading"  # downloaded, but not in Audiobookshelf yet
+    if mapped == "error":
+        req["error"] = "No copy could be downloaded. Try again later."
+    if mapped:
+        req["status"] = mapped
+        if mapped == "completed":
+            req["progress"] = 100
+    return req["status"]
+
+
+def _poll_request_status(req: dict, ctx: dict | None = None) -> str:
+    """Update one in-flight request in place and return its status.
+
+    Order of truth: the book is in Audiobookshelf (users can listen now) →
+    LazyLibrarian's per-book status → the legacy Readarr queue path. Shared
+    by refresh_requests and _background_completion_checker so both behave
+    identically — caller holds `lock`."""
+    ctx = ctx if ctx is not None else _build_poll_context()
+
+    if req.get("server_type") == "audiobook":
+        item_id = find_in_library(req.get("title", ""), ctx.get("abs_index", {}))
+        if item_id:
+            req.update(status="completed", progress=100, abs_item_id=item_id, error=None)
+            return req["status"]
+
     client = get_client(req["server_type"])
     if not client:
         return req["status"]
+    if isinstance(client, LazyLibrarianClient):
+        return _poll_lazylibrarian(req, ctx)
     try:
         queue = client.get_queue()
         req_book_id = req.get("readarr_book_id")
@@ -1441,6 +1595,17 @@ def _poll_request_status(req: dict) -> str:
     except Exception:
         pass  # Keep current status on error
     return req["status"]
+
+
+def _poll_all(reqs: list) -> None:
+    """One poll cycle over every in-flight request; notifies on completion."""
+    in_flight = [r for r in reqs if r["status"] in ("processing", "downloading")]
+    if not in_flight:
+        return
+    ctx = _build_poll_context()
+    for req in in_flight:
+        if _poll_request_status(req, ctx) == "completed":
+            _notify_completed_request(req)
 
 
 GLEN_COMPLETE_WEBHOOK_URL = os.environ.get("LIBRESEERR_COMPLETE_WEBHOOK_URL")
@@ -1481,13 +1646,9 @@ def _notify_completed_request(req: dict) -> None:
 def refresh_requests():
     """Refresh the status of all processing/downloading requests."""
     with lock:
-        for req in requests_history:
-            if req["status"] in ("completed", "error", "pending", "declined"):
-                continue
-            if _poll_request_status(req) == "completed":
-                _notify_completed_request(req)
+        _poll_all(requests_history)
         save_requests()
-    return jsonify(requests_history)
+        return jsonify(_with_links(_visible_requests()))
 
 
 def _background_completion_checker() -> None:
@@ -1502,11 +1663,7 @@ def _background_completion_checker() -> None:
         time.sleep(COMPLETION_CHECK_INTERVAL_SECONDS)
         try:
             with lock:
-                for req in requests_history:
-                    if req["status"] in ("completed", "error", "pending", "declined"):
-                        continue
-                    if _poll_request_status(req) == "completed":
-                        _notify_completed_request(req)
+                _poll_all(requests_history)
                 save_requests()
         except Exception as e:
             app.logger.warning("Background completion checker failed: %s", e)
@@ -1520,6 +1677,9 @@ threading.Thread(target=_background_completion_checker, daemon=True).start()
 def delete_request(request_id):
     with lock:
         global requests_history
+        entry = next((r for r in requests_history if r["id"] == request_id), None)
+        if not entry or not _can_manage(entry):
+            return jsonify({"error": "Request not found"}), 404
         requests_history = [r for r in requests_history if r["id"] != request_id]
         save_requests()
     return jsonify({"success": True})

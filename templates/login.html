@@ -3,36 +3,36 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Libreseerr - Login</title>
+    <title>GOJ Books · Sign in</title>
     <link rel="icon" type="image/x-icon" href="/static/favicon.ico">
     <link rel="preconnect" href="https://fonts.googleapis.com">
-    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+    <link href="https://fonts.googleapis.com/css2?family=Luckiest+Guy&family=Nunito:wght@400;700&display=swap" rel="stylesheet">
     <style>
         :root {
-            --bg-primary: #111827;
-            --bg-secondary: #1f2937;
-            --bg-hover: #374151;
-            --pink-primary: #ec4899;
-            --pink-dark: #db2777;
-            --pink-glow: rgba(236, 72, 153, 0.3);
-            --text-primary: #f3f4f6;
-            --text-secondary: #9ca3af;
-            --text-muted: #6b7280;
-            --border-color: #374151;
-            --error: #f87171;
+            --bg-primary: #1A0A00;
+            --bg-secondary: #2A1200;
+            --bg-hover: #3A1A06;
+            --pink-primary: #F4731A;
+            --pink-dark: #FF9A42;
+            --pink-glow: rgba(244, 115, 26, 0.16);
+            --text-primary: #FFF8E7;
+            --text-secondary: #C4885A;
+            --text-muted: #C4885A;
+            --border-color: #5C3010;
+            --error: #E8705A;
         }
 
         * { margin: 0; padding: 0; box-sizing: border-box; }
 
         body {
-            font-family: 'Inter', -apple-system, BlinkMacSystemFont, sans-serif;
+            font-family: 'Nunito', -apple-system, BlinkMacSystemFont, sans-serif;
             background: var(--bg-primary);
             color: var(--text-primary);
             min-height: 100vh;
             display: flex;
             align-items: center;
             justify-content: center;
-            background-image: linear-gradient(135deg, #1a0a1e 0%, #111827 50%, #1f1028 100%);
+            background-image: none;
         }
 
         .login-container {
@@ -106,7 +106,7 @@
         .login-btn {
             width: 100%;
             padding: 0.625rem;
-            background: linear-gradient(to bottom right, var(--pink-primary), var(--pink-dark));
+            background: var(--pink-primary); color: var(--bg-primary);
             color: white;
             border: none;
             border-radius: 0.5rem;
@@ -119,7 +119,7 @@
         }
 
         .login-btn:hover {
-            background: linear-gradient(to bottom right, var(--pink-dark), #9d174d);
+            background: var(--pink-dark);
         }
 
         .login-btn:disabled {
@@ -128,8 +128,8 @@
         }
 
         .login-error {
-            background: rgba(248, 113, 113, 0.1);
-            border: 1px solid rgba(248, 113, 113, 0.3);
+            background: rgba(232, 112, 90, 0.14);
+            border: 1px solid var(--error);
             color: var(--error);
             padding: 0.625rem;
             border-radius: 0.5rem;
@@ -187,32 +187,34 @@
             background: var(--bg-hover);
             border-color: var(--pink-primary);
         }
+        .brand-wordmark { font-family: 'Luckiest Guy', 'Nunito', sans-serif; font-weight: 400;
+        letter-spacing: 0.04em; color: var(--pink-primary); }
+    .login-btn { min-height: 44px; font-weight: 700; color: var(--bg-primary) !important; }
     </style>
 </head>
 <body>
     <div class="login-container">
         <div class="login-card">
             <div class="login-brand">
-                <img src="/static/LibreseerrLogo.png" alt="Libreseerr" class="login-logo">
-                <h1>Libreseerr</h1>
-                <p>Sign in to your account</p>
+                                <h1 class="brand-wordmark">GOJ Books</h1>
+                <p>Request audiobooks for Gallons of Juice. Sign in with the same email and password you use to watch.</p>
             </div>
             <div id="login-error" class="login-error"></div>
             <form id="login-form">
                 <div class="form-group">
-                    <label for="username">Username</label>
+                    <label for="username">Email</label>
                     <input type="text" id="username" name="username" required autocomplete="username" autofocus>
                 </div>
                 <div class="form-group">
                     <label for="password">Password</label>
                     <input type="password" id="password" name="password" required autocomplete="current-password">
                 </div>
-                <button type="submit" class="login-btn" id="login-btn">Sign In</button>
+                <button type="submit" class="login-btn" id="login-btn">Sign in</button>
             </form>
             <div class="login-divider" id="login-divider"><span>or</span></div>
             <a href="/api/auth/oidc/login" class="login-btn-secondary" id="oidc-login-btn">Sign in with OIDC</a>
         </div>
-        <div class="login-footer">Libreseerr &mdash; Book Request Management</div>
+        <div class="login-footer">Forgot your password? Reset it at gallonsofjuice.stream</div>
     </div>
     <script>
         // Surface OIDC error codes from the callback redirect.

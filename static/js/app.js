@@ -1,6 +1,6 @@
 // State
 let currentModalBook = null;
-let selectedServer = "ebook";
+let selectedServer = "audiobook";
 let currentUser = null;
 let editingUsername = null;
 let cachedAvailability = null;
@@ -37,7 +37,7 @@ async function loadCurrentUser() {
 
         // Set sidebar user info
         document.getElementById("sidebar-username").textContent = currentUser.username;
-        document.getElementById("sidebar-role").textContent = currentUser.role;
+        document.getElementById("sidebar-role").textContent = currentUser.role === "admin" ? "Approver" : "";
     } catch (err) {
         window.location.href = "/login";
     }
@@ -154,13 +154,13 @@ function renderBookCard(book) {
     if (book.author?.images?.length) cover = book.author.images[0].url;
     if (!cover && book.images?.length) cover = book.images[0].url;
     if (!cover && book.cover) cover = book.cover;
-    if (!cover) cover = "https://via.placeholder.com/200x300/1f2937/ec4899?text=No+Cover";
     const bookJson = JSON.stringify(book).replace(/"/g, "&quot;");
 
     return `
         <div class="book-card" data-book="${bookJson}">
-            <img class="book-cover" src="${cover}" alt="${title}" loading="lazy"
-                 onerror="this.src='https://via.placeholder.com/200x300/1f2937/ec4899?text=No+Cover'">
+            ${cover
+                ? `<img class="book-cover" src="${esc(cover)}" alt="" loading="lazy" onerror="this.replaceWith(Object.assign(document.createElement('div'), {className: 'book-cover book-cover-blank', textContent: this.closest('.book-card').querySelector('.book-title').textContent}))">`
+                : `<div class="book-cover book-cover-blank">${esc(title)}</div>`}
             <div class="book-overlay">
                 <div class="book-overlay-title">${title}</div>
                 <div class="book-overlay-author">${author}${year ? " (" + year + ")" : ""}</div>
@@ -195,7 +195,8 @@ function applyAvailabilityBadges(availability) {
         const hasEbook = (isbn && availability.ebook.isbns.includes(isbn)) ||
             (title && availability.ebook.titles.includes(title));
         const hasAudiobook = (isbn && availability.audiobook.isbns.includes(isbn)) ||
-            (title && availability.audiobook.titles.includes(title));
+            (title && availability.audiobook.titles.includes(title)) ||
+            Boolean((availability.listen || {})[normTitle(book.title)]);
         const ebookRequested = availability.ebook_requests &&
             ((isbn && availability.ebook_requests.isbns.includes(isbn)) ||
             (title && availability.ebook_requests.titles.includes(title)));
@@ -212,7 +213,7 @@ function applyAvailabilityBadges(availability) {
         let html = '<div class="book-badges">';
         if (showEbook === "available") html += '<span class="book-badge ebook">eBook ✓</span>';
         else if (showEbook === "requested") html += '<span class="book-badge ebook-requested">eBook Requested</span>';
-        if (showAudiobook === "available") html += '<span class="book-badge audiobook">Audiobook ✓</span>';
+        if (showAudiobook === "available") html += '<span class="book-badge audiobook">On GOJ</span>';
         else if (showAudiobook === "requested") html += '<span class="book-badge audiobook-requested">Audiobook Requested</span>';
         html += '</div>';
         card.querySelector(".book-info").insertAdjacentHTML("beforeend", html);
@@ -268,20 +269,40 @@ async function loadDiscovery() {
     fetchAvailability().then(applyAvailabilityBadges);
 }
 
-// ─── Download Modal ───
+// ─── Request Modal ───
+
+function esc(value) {
+    return String(value ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+}
+
+// Mirrors book_matching.norm_title on the server.
+function normTitle(title) {
+    let t = String(title || "").toLowerCase().split(/[:(\[]/)[0];
+    t = t.replace(/[^a-z0-9]+/g, " ").trim();
+    return t.replace(/^(the|a|an)\s+/, "").trim();
+}
+
+function bookAuthor(book) {
+    return book.author?.authorName || (Array.isArray(book.authors) ? book.authors.join(", ") : "");
+}
+
+function isAdmin() {
+    return currentUser && currentUser.role === "admin";
+}
 
 async function openDownloadModal(book) {
     currentModalBook = book;
-    selectedServer = "ebook";
+    document.getElementById("modal-book-title").textContent = book.title || "Unknown title";
+    document.getElementById("modal-book-author").textContent = bookAuthor(book).split(", ")[0];
+    const cover = document.getElementById("modal-cover");
+    cover.src = book.cover || "";
+    cover.style.visibility = book.cover ? "visible" : "hidden";
 
-    document.getElementById("modal-title").textContent = "Download: " + (book.title || "Unknown");
     document.querySelectorAll(".server-btn").forEach((btn) => {
-        btn.classList.toggle("active", btn.dataset.server === selectedServer);
         btn.onclick = () => selectServer(btn.dataset.server);
     });
-
     document.getElementById("download-modal").classList.add("active");
-    await loadModalOptions(selectedServer);
+    await selectServer("audiobook");
 }
 
 function closeModal() {
@@ -294,149 +315,136 @@ async function selectServer(server) {
     document.querySelectorAll(".server-btn").forEach((btn) => {
         btn.classList.toggle("active", btn.dataset.server === server);
     });
-    await loadModalOptions(server);
-}
+    const btn = document.getElementById("confirm-download-btn");
+    const listenBox = document.getElementById("modal-listen");
+    const hint = document.getElementById("modal-hint");
+    const label = server === "audiobook" ? "audiobook" : "eBook";
 
-async function loadModalOptions(server) {
-    const profileSelect = document.getElementById("quality-profile");
-    const folderSelect = document.getElementById("root-folder");
-    profileSelect.innerHTML = '<option>Loading...</option>';
-    folderSelect.innerHTML = '<option>Loading...</option>';
+    btn.style.display = "";
+    btn.textContent = `Request ${label}`;
+    listenBox.style.display = "none";
+    hint.textContent = isAdmin()
+        ? "You're an approver, so this starts searching right away."
+        : `Ryan or Justin approves requests, then we find the ${label}. We'll email you when it's ready.`;
 
-    try {
-        const [profilesResp, foldersResp] = await Promise.all([
-            fetch("/api/profiles/" + server),
-            fetch("/api/rootfolders/" + server),
-        ]);
-        const profiles = await profilesResp.json();
-        const folders = await foldersResp.json();
-
-        if (profiles.error) {
-            profileSelect.innerHTML = `<option disabled>${profiles.error}</option>`;
-        } else {
-            profileSelect.innerHTML = profiles
-                .map((p) => `<option value="${p.id}">${p.name}</option>`)
-                .join("");
-        }
-
-        if (folders.error) {
-            folderSelect.innerHTML = `<option disabled>${folders.error}</option>`;
-        } else {
-            folderSelect.innerHTML = folders
-                .map((f) => `<option value="${f.path}">${f.path}</option>`)
-                .join("");
-        }
-    } catch (err) {
-        profileSelect.innerHTML = '<option disabled>Error loading</option>';
-        folderSelect.innerHTML = '<option disabled>Error loading</option>';
+    if (server !== "audiobook" || !currentModalBook) return;
+    const availability = await fetchAvailability();
+    const link = (availability.listen || {})[normTitle(currentModalBook.title)];
+    if (link) {
+        listenBox.innerHTML = `This one is already on GOJ. <a href="${esc(link)}" target="_blank" rel="noopener">Listen now</a>`;
+        listenBox.style.display = "";
+        btn.style.display = "none";
+        hint.textContent = "";
     }
 }
 
 document.getElementById("confirm-download-btn").addEventListener("click", async () => {
     if (!currentModalBook) return;
-
     const btn = document.getElementById("confirm-download-btn");
+    const original = btn.textContent;
     btn.disabled = true;
-    btn.textContent = "Sending...";
-
-    const qualityProfileId = parseInt(document.getElementById("quality-profile").value);
-    const rootFolder = document.getElementById("root-folder").value;
-
-    if (!qualityProfileId || !rootFolder) {
-        alert("Please select a quality profile and root folder.");
-        btn.disabled = false;
-        btn.textContent = "Download";
-        return;
-    }
+    btn.textContent = "Sending";
 
     try {
         const resp = await fetch("/api/request", {
             method: "POST",
             headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({
-                server_type: selectedServer,
-                book: currentModalBook,
-                quality_profile_id: qualityProfileId,
-                root_folder: rootFolder,
-            }),
+            body: JSON.stringify({ server_type: selectedServer, book: currentModalBook }),
         });
         const data = await resp.json();
-        if (data.error) {
-            alert("Error: " + data.error);
-        } else {
-            closeModal();
-            // Switch to requests page
-            document.querySelector('[data-page="requests"]').click();
+        if (data.error === "already_available") {
+            cachedAvailability = null;
+            await selectServer(selectedServer);
+            return;
         }
+        if (data.error) {
+            document.getElementById("modal-hint").textContent = "That didn't go through: " + data.error;
+            return;
+        }
+        cachedAvailability = null;
+        closeModal();
+        document.querySelector('[data-page="requests"]').click();
     } catch (err) {
-        alert("Error: " + err.message);
+        document.getElementById("modal-hint").textContent = "That didn't go through. Check your connection and try again.";
     } finally {
         btn.disabled = false;
-        btn.textContent = "Download";
+        btn.textContent = original;
     }
 });
 
 // ─── Requests ───
 
+// Status as language (Jack-Vault Design/Switchboard.md): never raw states.
+const REQUEST_STATES = {
+    pending: { cls: "waiting", label: "Waiting for approval", sub: "Ryan or Justin will approve it soon." },
+    processing: { cls: "searching", label: "Searching for a copy", sub: "This can take a few hours." },
+    downloading: { cls: "downloading", label: "Downloading", sub: "Almost there." },
+    completed: { cls: "ready", label: "Ready", sub: "" },
+    error: { cls: "problem", label: "Couldn't get this one", sub: "" },
+    declined: { cls: "declined", label: "Not approved", sub: "Ask Ryan if you'd like to talk it over." },
+};
+
 async function loadRequests() {
     const list = document.getElementById("requests-list");
+    document.getElementById("requests-heading").textContent = isAdmin() ? "All requests" : "My requests";
     try {
         const resp = await fetch("/api/requests");
         const data = await resp.json();
         if (!data.length) {
-            list.innerHTML = '<div class="empty-state">No requests yet. Search for books and download them!</div>';
+            list.innerHTML = '<div class="empty-state">Nothing requested yet. Search for a book and tap it to ask for the audiobook.</div>';
             return;
         }
         list.innerHTML = data.map(renderRequest).join("");
-        list.querySelectorAll(".delete-btn").forEach((btn) => {
-            btn.addEventListener("click", async (e) => {
-                e.stopPropagation();
-                const id = parseInt(btn.dataset.id);
-                await fetch("/api/requests/" + id, { method: "DELETE" });
-                loadRequests();
-            });
+        list.querySelectorAll("[data-action]").forEach((btn) => {
+            btn.addEventListener("click", () => requestAction(btn.dataset.action, parseInt(btn.dataset.id), btn));
         });
     } catch (err) {
-        list.innerHTML = `<div class="empty-state">Error loading requests</div>`;
+        list.innerHTML = '<div class="empty-state">Couldn\'t load your requests. Refresh the page to try again.</div>';
     }
 }
 
-function renderRequest(req) {
-    const cover = req.cover_url || "https://via.placeholder.com/50x75/1f2937/ec4899?text=N/A";
-    const progress = req.progress || 0;
-    const fillClass = req.status === "completed" ? "complete" : req.status === "error" ? "error" : "";
-
-    let statusDisplay;
-    if (req.status === "processing" || req.status === "pending") {
-        statusDisplay = '<span class="status-label processing"><span class="spinner"></span> Processing</span>';
-    } else if (req.status === "completed") {
-        statusDisplay = `<span class="status-label completed">Completed</span>
-                <div class="progress-bar">
-                    <div class="progress-fill complete" style="width: 100%"></div>
-                </div>`;
-    } else if (req.status === "error") {
-        statusDisplay = `<span class="status-label error">Error</span>
-                ${req.error ? `<div class="request-error" title="${req.error}">${req.error}</div>` : ""}`;
-    } else {
-        // downloading
-        statusDisplay = `<span class="status-label downloading">Downloading</span>
-                <div class="progress-bar">
-                    <div class="progress-fill" style="width: ${progress}%"></div>
-                </div>`;
+async function requestAction(action, id, btn) {
+    if (action === "remove" && !confirm("Remove this request?")) return;
+    btn.disabled = true;
+    if (action === "remove") {
+        await fetch("/api/requests/" + id, { method: "DELETE" });
+    } else if (action === "retry") {
+        await fetch(`/api/requests/${id}/retry`, { method: "POST" });
     }
+    loadRequests();
+}
+
+function renderRequest(req) {
+    const state = REQUEST_STATES[req.status] || REQUEST_STATES.processing;
+    const format = req.server_type === "ebook" ? "eBook" : "Audiobook";
+    let sub = state.sub;
+    if (req.status === "completed") sub = req.listen_url ? "" : `Find it in the ${format === "eBook" ? "eBook" : "Audiobooks"} app.`;
+    if (req.status === "error") sub = req.error || "Something went wrong.";
+    if (req.status === "downloading" && req.progress > 0 && req.progress < 100) sub = `${req.progress}% downloaded`;
+
+    const actions = [];
+    if (req.listen_url) actions.push(`<a class="btn btn-small btn-listen" href="${esc(req.listen_url)}" target="_blank" rel="noopener">Listen now</a>`);
+    if (req.status === "error") actions.push(`<button class="btn btn-small btn-primary" data-action="retry" data-id="${req.id}">Try again</button>`);
+    if (["pending", "error", "declined"].includes(req.status) || isAdmin()) {
+        actions.push(`<button class="btn btn-small btn-quiet" data-action="remove" data-id="${req.id}">Remove</button>`);
+    }
+    const by = isAdmin() && req.requested_by ? `<div class="request-by">Asked by ${esc(req.requested_by)}</div>` : "";
+    const cover = req.cover_url
+        ? `<img class="request-cover" src="${esc(req.cover_url)}" alt="" onerror="this.style.visibility='hidden'">`
+        : '<div class="request-cover"></div>';
 
     return `
         <div class="request-item">
-            <img class="request-cover" src="${cover}" alt="${req.title}"
-                 onerror="this.src='https://via.placeholder.com/50x75/1f2937/ec4899?text=N/A'">
+            ${cover}
             <div class="request-details">
-                <div class="request-title">${req.title}</div>
-                <div class="request-meta">${req.author || ""}</div>
-                <span class="request-server ${req.server_type}">${req.server_type}</span>
+                <div class="request-title">${esc(req.title)}</div>
+                <div class="request-meta">${esc(req.author || "")} · ${format}</div>
+                ${by}
             </div>
             <div class="request-status">
-                ${statusDisplay}
-                <button class="btn btn-small btn-danger delete-btn" data-id="${req.id}" style="margin-top: 0.4rem">Remove</button>
+                <span class="request-state ${state.cls}">${state.label}</span>
+                ${sub ? `<div class="request-sub">${esc(sub)}</div>` : ""}
+                <div class="request-actions">${actions.join("")}</div>
             </div>
         </div>`;
 }
@@ -444,13 +452,13 @@ function renderRequest(req) {
 document.getElementById("refresh-btn").addEventListener("click", async () => {
     const btn = document.getElementById("refresh-btn");
     btn.disabled = true;
-    btn.textContent = "Refreshing...";
+    btn.textContent = "Checking";
     try {
         await fetch("/api/requests/refresh", { method: "POST" });
         await loadRequests();
     } finally {
         btn.disabled = false;
-        btn.textContent = "Refresh Status";
+        btn.textContent = "Check again";
     }
 });
 
