@@ -75,6 +75,24 @@ def test_poll_lazylibrarian_maps_status(ll_status, server_type, expected):
     assert app_module._poll_lazylibrarian(req, ctx) == expected
 
 
+def test_skipped_book_is_requeued_once_as_audiobook(monkeypatch):
+    calls = []
+
+    class FakeLL(LazyLibrarianClient):
+        def __init__(self):
+            pass
+
+        def queue_and_search(self, book_id, server_type):
+            calls.append((book_id, server_type))
+
+    monkeypatch.setattr(app_module, "get_client", lambda server_type: FakeLL())
+    req = {"status": "processing", "server_type": "audiobook", "readarr_book_id": "7", "created_at": "2026-11-18T00:00:00"}
+    ctx = {"ll_statuses": {"7": {"eBook": "Skipped", "AudioBook": "Skipped"}}}
+    assert app_module._poll_lazylibrarian(req, ctx) == "processing"
+    app_module._poll_lazylibrarian(req, ctx)  # second poll inside the interval
+    assert calls == [("7", "audiobook")]
+
+
 def test_poll_marks_untracked_old_request_as_error():
     req = {"status": "processing", "server_type": "audiobook", "readarr_book_id": "readarr-era", "created_at": "2026-06-01T00:00:00"}
     assert app_module._poll_lazylibrarian(req, {"ll_statuses": {"other": {}}}) == "error"

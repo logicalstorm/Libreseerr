@@ -1517,6 +1517,26 @@ def _age_days(req: dict) -> float:
         return 0.0
 
 
+REQUEUE_STATUSES = ("Skipped", "Ignored", "")
+REQUEUE_INTERVAL_SECONDS = 6 * 3600
+
+
+def _requeue(req: dict) -> None:
+    """A request we're tracking is Skipped in LazyLibrarian (e.g. queued as
+    the wrong format by an older build, or queued before addBook finished):
+    mark it Wanted in the right format again, at most every few hours."""
+    now = time.time()
+    if now - req.get("requeued_at", 0) < REQUEUE_INTERVAL_SECONDS:
+        return
+    req["requeued_at"] = now
+    client = get_client(req["server_type"])
+    try:
+        client.queue_and_search(str(req["readarr_book_id"]), req["server_type"])
+        app.logger.info("Re-queued '%s' as %s", req.get("title"), ll_type_for(req["server_type"]))
+    except Exception as e:
+        app.logger.warning("Re-queue of '%s' failed: %s", req.get("title"), e)
+
+
 def _poll_lazylibrarian(req: dict, ctx: dict) -> str:
     """Map LazyLibrarian's own per-book status onto the request."""
     book = ctx.get("ll_statuses", {}).get(str(req.get("readarr_book_id", "")))
@@ -1527,7 +1547,11 @@ def _poll_lazylibrarian(req: dict, ctx: dict) -> str:
             req["status"] = "error"
             req["error"] = "The downloader lost track of this one. Try again."
         return req["status"]
-    mapped = LL_STATUS_MAP.get(book.get(ll_type_for(req["server_type"]), ""))
+    raw = book.get(ll_type_for(req["server_type"]), "")
+    if raw in REQUEUE_STATUSES:
+        _requeue(req)
+        return req["status"]
+    mapped = LL_STATUS_MAP.get(raw)
     if mapped == "completed" and req["server_type"] == "audiobook":
         mapped = "downloading"  # downloaded, but not in Audiobookshelf yet
     if mapped == "error":

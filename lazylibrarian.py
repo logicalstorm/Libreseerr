@@ -145,21 +145,25 @@ class LazyLibrarianClient:
         add_result = self._get("addBook", timeout=LOOKUP_TIMEOUT_SECONDS, id=book_id, wait=1)
         logger.info("addBook result: %s", add_result)
 
-        queue_result = self._get("queueBook", id=book_id, type=ll_type)
-        logger.info("queueBook result: %s", queue_result)
-
-        try:
-            search_result = self._get("searchBook", id=book_id, type=ll_type)
-            logger.info("searchBook result: %s", search_result)
-        except requests.RequestException as e:
-            # The hourly search will still pick it up; don't fail the request.
-            logger.warning("searchBook for %s failed (will rely on scheduled search): %s", book_id, e)
+        self.queue_and_search(book_id, server_type)
 
         return {
             "id": book_id,
             "title": title,
             "foreignBookId": book_id,
         }
+
+    def queue_and_search(self, book_id: str, server_type: str) -> None:
+        """Mark a book Wanted in the right library and search for it now."""
+        ll_type = ll_type_for(server_type)
+        queue_result = self._get("queueBook", id=book_id, type=ll_type)
+        logger.info("queueBook %s (%s): %s", book_id, ll_type, queue_result)
+        try:
+            search_result = self._get("searchBook", id=book_id, type=ll_type)
+            logger.info("searchBook result: %s", search_result)
+        except requests.RequestException as e:
+            # The hourly search will still pick it up; don't fail the request.
+            logger.warning("searchBook for %s failed (will rely on scheduled search): %s", book_id, e)
 
     def get_book_statuses(self) -> dict:
         """{BookID: {"eBook": Status, "AudioBook": AudioStatus}} for every
